@@ -49,8 +49,13 @@ eas build -p ios --profile preview        # 出 iOS 包，需 Apple 开发者账
 
 ## 远程使用（不在同一 WiFi）
 
-让中继走 Tailscale HTTPS（见根目录 README §远程访问），App 里把中继地址填成
-`https://<机器名>.ts.net`，WebSocket 会自动走 `wss://`。
+电脑先运行中继 `npm start`，再运行 `tailscale funnel --bg 4123`。首次启用按命令提示完成授权，确认输出 **`Available on the internet`**。详细启动、从 Serve 切换和关闭方法见[根目录 README](../README.md#4-手机远程访问tailscale-funnel)。
+
+手机不需要安装 Tailscale 或配置 VPN。在 App 中选择 **「局域网直连」** 模式，中继地址填写 Funnel 输出的完整 HTTPS 域名，例如 `https://my-pc.tail123456.ts.net`（替换成实际域名，不加 `:4123`），再填写中继 Token；WebSocket 自动使用 `wss://`。浏览器也可直接打开这个地址使用网页客户端。
+
+`tailscale serve` 的 HTTPS 地址和 `100.x.x.x` 的 Tailscale IP 仍只供私网使用；免装 Tailscale 的远程访问需要 **Funnel**。公网 DNS 首次更新可能需要最多约 10 分钟，保持电脑、中继和 Tailscale 运行后稍候重试。
+
+Funnel 这里只转发中继，不转发 Expo 的 Metro 开发服务。使用 Expo Go 时还需确保手机能访问 Metro；只想用手机浏览器时直接打开 Funnel 地址即可。
 
 ## 结构
 
@@ -71,6 +76,7 @@ mobile/
 ## 故障排查
 
 - **扫码后连不上 Metro**：手机和电脑要同一 WiFi；或 `npx expo start --tunnel`（走隧道，跨网络）。
-- **App 里连不上中继**：用电脑 `npm start` 打印的实际局域网 IP；放行防火墙 4123；中继要在运行。
+- **App 里连不上中继**：局域网直连时使用电脑 `npm start` 打印的实际局域网 IP，检查防火墙是否允许 4123。Funnel 远程访问时使用它输出的 HTTPS 域名，不加 `:4123`，并确认选择「局域网直连」模式和正确 Token。两种方式都要求中继持续运行。
+- **Funnel 域名打不开**：先等待公网 DNS 生效，再用手机移动网络访问 `https://<实际域名>/health`。返回 `"ok": true` 表示转发正常；若仍失败，按根目录 README 的排查步骤区分 DNS、HTTPS 和本地服务问题。
 - **状态卡在「中继已连，等待 Codex」**：中继没连上 codex，看中继终端日志。
 - **收不到通知**：设置里点「开启审批通知」并在系统里允许。

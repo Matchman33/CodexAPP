@@ -45,8 +45,10 @@ npm start
   Token: <你的Token（npm start 时终端会打印）>
 ```
 
-> 别的设备连不上 → 放行防火墙：
+> 同一局域网的其他设备直连 4123 端口时，如被 Windows 防火墙拦截，可在管理员 PowerShell 中放行：
 > `New-NetFirewallRule -DisplayName "CodexApp 4123" -Direction Inbound -LocalPort 4123 -Protocol TCP -Action Allow`
+>
+> 使用下文的 Funnel 时，通过本机回环地址转发，不需要将 4123 端口直接开放到公网，也不需要路由器端口映射。
 
 ## Windows 防自动睡眠
 
@@ -83,21 +85,65 @@ App 里可调：`on-request`(默认) / `untrusted`(几乎每条都问) / `on-fai
 
 > `permission` 类审批 v1 只支持拒绝；命令、文件改动审批的批准/拒绝都完整。
 
-## 4. 远程访问 + 推送通知（Tailscale HTTPS）
+## 4. 手机远程访问（Tailscale Funnel）
 
-⚠️ iOS 推送通知 / PWA Service Worker、以及移动端可靠后台都更适合走 **HTTPS**。局域网 `http://`
-下核心功能（提示词/审批/状态）全可用。推荐：
+电脑安装并登录 Tailscale，通过 **Funnel** 将本地中继发布为公网 HTTPS 地址。手机只需浏览器，不需要安装 Tailscale、配置 VPN 或与电脑连接同一 WiFi。这是中继直连方式，不需要部署本项目的云端 Broker。
+
+### 电脑端启动
+
+1. 在项目根目录运行 `npm start`，保持中继进程运行。确认本机访问 `http://127.0.0.1:4123/health` 返回 `"ok": true`。
+2. 在另一个 PowerShell 窗口启用 Funnel：
+
+   ```powershell
+   tailscale funnel --bg 4123
+   ```
+
+   首次使用如果提示 Funnel 未启用，打开命令输出的授权链接，完成授权；若没有自动继续，再运行一次上述命令。
+3. 成功输出应包含 **`Available on the internet`**，例如：
+
+   ```text
+   Available on the internet:
+   https://my-pc.tail123456.ts.net/
+   |-- proxy http://127.0.0.1:4123
+   ```
+
+   使用命令实际输出的完整域名，示例域名不可直接使用。`--bg` 让代理在后台运行，可以关闭该命令窗口；运行 `npm start` 的中继进程和电脑上的 Tailscale 仍需保持运行。
+
+如果此前已经运行过 `tailscale serve --bg 4123`，先关闭原来的 HTTPS Serve，再运行 Funnel：
 
 ```powershell
-tailscale serve --bg 4123   # 得到 https://<机器名>.ts.net/，WS 自动走 wss
+tailscale serve --https=443 off
+tailscale funnel --bg 4123
 ```
 
-App / 网页里把中继地址填成这个 https 地址即可。
+**Serve 与 Funnel 的访问范围不同**：Serve 输出 `Available within your tailnet`，即使获得 HTTPS 域名，也仍要求手机接入同一个 Tailscale 网络。`100.x.x.x` 的 Tailscale IP 同样不能直接从公网访问。手机免装 Tailscale 需要使用 Funnel。
+
+### 手机连接
+
+1. 浏览器打开 Funnel 输出的 HTTPS 地址，**不要加 `:4123`**。
+2. 项目连接页选择 **「局域网直连」** 模式。这个选项表示「中继地址 + Token」直连，Funnel 也使用该模式。
+3. 中继地址填写同一个完整 HTTPS 地址，Token 填电脑端 `npm start` 输出的 Token，再点连接。不要填旧的 `http://192.168.x.x:4123` 或 `http://100.x.x.x:4123` 地址；WebSocket 会自动使用 `wss://`。
+
+Expo 客户端也使用相同的 HTTPS 中继地址和 Token。浏览器支持时可添加到主屏幕；HTTPS 本身不保证手机锁屏后网页仍保持连接或持续接收通知。
+
+### 检查与关闭
+
+```powershell
+tailscale funnel status             # 检查公网转发状态
+tailscale funnel --https=443 off     # 关闭公网入口，本地中继继续运行
+```
+
+- **刚启用后域名打不开**：公网 DNS 记录可能需要最多约 10 分钟生效。保持服务运行，不必反复开关 Funnel；稍后用手机移动网络重试。
+- **区分域名故障与应用连接故障**：在手机打开 `https://<实际域名>/health`。返回包含 `"ok": true` 的 JSON 表示 HTTPS 转发已通；若网页能打开但应用断线，检查「局域网直连」模式中的中继地址是否已换成该 HTTPS 域名，以及 Token 是否正确。
+- **电脑能打开、手机打不开**：开启 Tailscale 的电脑可能通过私网访问同一域名，本机成功不等于公网已通。手机用移动网络测试；若 DNS 等待后仍失败，记录浏览器的具体错误，区分域名解析、连接超时和证书问题。
+- **本机 `/health` 也打不开**：检查中继是否仍运行、端口是否为 4123。中继端口改变时，Funnel 的目标端口也需同步修改。
+
+访问范围、授权和 DNS 等待时间见 [Tailscale Funnel 官方文档](https://tailscale.com/docs/features/tailscale-funnel)。
 
 ## 5. 安全
 
 - **Token 即权限**：拿到地址+Token 就能批准你电脑上的命令，当密码保管。
-- 别裸暴露公网；远程用 Tailscale（私网+HTTPS）。
+- Funnel 提供公网入口，不替代项目的身份校验。保留 Token 校验，不在分享链接、截图或公开日志中附带 Token；不要把本地 4123 端口直接映射到公网。
 - `~/.codex/config.toml` 内含第三方中转明文 token，别外发该文件/截图。
 - 审批策略别设 `never`，否则远程控制等于放开。
 
