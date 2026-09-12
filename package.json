@@ -5,19 +5,26 @@
   "type": "module",
   "description": "Relay + PWA to remote-control a local Codex app-server from an iPhone.",
   "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "prestart": "npm run build:web",
     "test": "node --test tests/*.test.mjs",
+    "test:web": "npm run build:web && node tests/web-ui.integration.mjs",
     "test:writer-process": "node tests/writerControl.windows.integration.mjs",
     "test:sleep-process": "node tests/sleepPrevention.windows.integration.mjs",
     "start": "node relay/server.mjs",
     "probe": "node relay/probe.mjs"
   },
   "dependencies": {
+    "dompurify": "^3.4.15",
+    "lucide": "^1.45.0",
+    "marked": "^18.0.12",
     "nodemailer": "^9.0.1",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "esbuild": "^0.28.1",
     "postject": "^1.0.0-alpha.6"
   }

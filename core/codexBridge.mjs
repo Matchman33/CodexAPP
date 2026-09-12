@@ -192,6 +192,7 @@ export class CodexBridge {
       codexConnected: false, codexVersion: null, threadId: null, turnId: null,
       cwd: config.defaultCwd, status: "idle", model: config.model || null,
       effectiveModel: null,
+      reasoningEffort: config.reasoningEffort || null, effectiveReasoningEffort: null,
       approvalPolicy: config.approvalPolicy, sandbox: config.sandbox,
       threadName: null, lastDiff: "", readOnly: false,
     };
@@ -256,7 +257,7 @@ export class CodexBridge {
     return {
       type: "hello",
       state: this.state,
-      config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd, model: this.state.model },
+      config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd, model: this.state.model, reasoningEffort: this.state.reasoningEffort },
       pendingApprovals: [...this.pendingApprovals.values()].map((v) => v.approval),
       recentEvents: this.eventLog,
       diff: this.state.lastDiff,
@@ -302,6 +303,7 @@ export class CodexBridge {
       case "thread/settings/updated":
         if (params?.threadId === st.threadId && params?.threadSettings?.model) {
           st.effectiveModel = params.threadSettings.model;
+          if (Object.hasOwn(params.threadSettings, "effort")) st.effectiveReasoningEffort = params.threadSettings.effort;
           this._broadcastState();
         }
         break;
@@ -395,7 +397,9 @@ export class CodexBridge {
         return this._resumeThread(m.threadId);
       case "listModels": return this.emit(await this.models.list(m.cwd || this.state.cwd));
       case "setConfig":
-        if (Object.hasOwn(m, "model")) this.state.model = this.models.select(m.model);
+        this.models.update(m);
+        this.state.model = this.config.model || null;
+        this.state.reasoningEffort = this.config.reasoningEffort || null;
         if (m.approvalPolicy) this.state.approvalPolicy = m.approvalPolicy;
         if (m.sandbox) this.state.sandbox = m.sandbox;
         if (m.cwd) this.state.cwd = m.cwd;
@@ -411,12 +415,15 @@ export class CodexBridge {
     if (!text) return;
     const model = await this.models.resolve(cwd || this.state.cwd);
     if (!await this._ensureThread(cwd, model)) return;
+    const effort = await this.models.resolveEffort(cwd || this.state.cwd, model, this.state.effectiveReasoningEffort);
     const params = { threadId: this.state.threadId, input: [{ type: "text", text, text_elements: [] }], approvalPolicy: this.state.approvalPolicy };
     if (cwd) params.cwd = cwd;
     params.model = model;
+    params.effort = effort;
     this._pushEvent({ kind: "user", text });
     const res = await this.codex.request("turn/start", params);
     this.state.effectiveModel = model;
+    this.state.effectiveReasoningEffort = effort;
     this.state.turnId = res?.turn?.id || res?.id || this.state.turnId;
     this.state.status = "running";
     this._broadcastState();
@@ -445,6 +452,8 @@ export class CodexBridge {
     if (this.state.status === "running") throw new Error("请先停止当前任务再新建会话");
     this.state.threadId = null; this.state.turnId = null; this.state.status = "idle";
     this.state.threadName = null; this.state.lastDiff = ""; this.state.readOnly = false;
+    this.state.effectiveReasoningEffort = null;
+    this.state.effectiveModel = null;
     this.eventLog = [];
     this.emit(this.snapshot());
     if (cwd) this.state.cwd = cwd;
@@ -464,6 +473,7 @@ export class CodexBridge {
     this.state.status = "idle";
     this.state.readOnly = true;
     this.state.effectiveModel = null;
+    this.state.effectiveReasoningEffort = null;
     this.state.lastDiff = "";
     this.eventLog = historyEvents(t);
     this.emit(this.snapshot());
@@ -487,6 +497,7 @@ export class CodexBridge {
     this.state.lastDiff = "";
     this.state.threadName = t.name || t.preview || null;
     this.state.effectiveModel = res?.model || null;
+    this.state.effectiveReasoningEffort = res?.reasoningEffort || null;
     this.state.readOnly = false;
     const history = await readThreadHistory(this.codex, this.state.threadId, t);
     this.eventLog = historyEvents(history);

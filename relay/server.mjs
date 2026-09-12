@@ -46,6 +46,7 @@ const DEFAULT_CONFIG = {
   sandbox: "workspace-write",
   // Optional model override (null = use Codex default from config.toml).
   model: null,
+  reasoningEffort: null,
   // Windows only: keep the system awake while this service is running.
   preventSleep: true,
   // Client identifier (originator) Codex reports upstream. Some API relays only
@@ -91,6 +92,7 @@ const state = {
   status: "idle", // "idle" | "running"
   model: config.model,
   effectiveModel: null,
+  reasoningEffort: config.reasoningEffort, effectiveReasoningEffort: null,
   approvalPolicy: config.approvalPolicy,
   sandbox: config.sandbox,
   threadName: null, // user-facing name of the active conversation
@@ -222,7 +224,7 @@ class CodexClient {
 }
 
 const codex = new CodexClient(config.codexBin);
-const models = new ModelSettings(codex, config, (model) => persistModel(CONFIG_PATH, model));
+const models = new ModelSettings(codex, config, (model, settings) => persistModel(CONFIG_PATH, model, settings));
 const writers = new WriterControl({ protectedPids: () => [process.pid, codex.child?.pid] });
 
 // ---------------------------------------------------------------------------
@@ -380,6 +382,7 @@ function handleNotification(msg) {
     case "thread/settings/updated":
       if (params?.threadId === state.threadId && params?.threadSettings?.model) {
         state.effectiveModel = params.threadSettings.model;
+        if (Object.hasOwn(params.threadSettings, "effort")) state.effectiveReasoningEffort = params.threadSettings.effort;
         broadcastState();
       }
       break;
@@ -494,6 +497,7 @@ async function startTurn(text, cwd) {
   if (!text) return;
   const model = await models.resolve(cwd || state.cwd);
   if (!await ensureThread(cwd, model)) return;
+  const effort = await models.resolveEffort(cwd || state.cwd, model, state.effectiveReasoningEffort);
   const params = {
     threadId: state.threadId,
     input: [{ type: "text", text, text_elements: [] }],
@@ -504,9 +508,11 @@ async function startTurn(text, cwd) {
   };
   if (cwd) params.cwd = cwd;
   params.model = model;
+  params.effort = effort;
   pushEvent({ kind: "user", text });
   const res = await codex.request("turn/start", params);
   state.effectiveModel = model;
+  state.effectiveReasoningEffort = effort;
   state.turnId = res?.turn?.id || res?.id || state.turnId;
   state.status = "running";
   broadcastState();
@@ -552,9 +558,11 @@ async function newThread(cwd) {
   state.status = "idle";
   state.threadName = null;
   state.readOnly = false;
+  state.effectiveReasoningEffort = null;
+  state.effectiveModel = null;
+  state.lastDiff = "";
   eventLog.length = 0;
   broadcast(snapshot());
-  state.lastDiff = "";
   if (cwd) state.cwd = cwd;
   await ensureThread(cwd);
   pushEvent({ kind: "thread", text: "新建会话 @ " + state.cwd });
@@ -574,6 +582,7 @@ async function readThread(threadId) {
   state.status = "idle";
   state.readOnly = true;
   state.effectiveModel = null;
+  state.effectiveReasoningEffort = null;
   state.lastDiff = "";
   eventLog.splice(0, eventLog.length, ...historyEvents(t));
   broadcast(snapshot());
@@ -599,6 +608,7 @@ async function resumeThread(threadId) {
   state.lastDiff = "";
   state.threadName = t.name || t.preview || null;
   state.effectiveModel = res?.model || null;
+  state.effectiveReasoningEffort = res?.reasoningEffort || null;
 
   state.readOnly = false;
   const history = await readThreadHistory(codex, state.threadId, t);
@@ -666,7 +676,7 @@ function snapshot() {
   return {
     type: "hello",
     state,
-    config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd, model: state.model },
+    config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd, model: state.model, reasoningEffort: state.reasoningEffort },
     pendingApprovals: [...pendingApprovals.values()].map((v) => v.approval),
     recentEvents: eventLog,
     diff: state.lastDiff,
@@ -737,7 +747,9 @@ wss.on("connection", (ws, req) => {
             send(ws, await models.list(m.cwd || state.cwd));
             break;
           case "setConfig":
-            if (Object.hasOwn(m, "model")) state.model = models.select(m.model);
+            models.update(m);
+            state.model = config.model || null;
+            state.reasoningEffort = config.reasoningEffort || null;
             if (m.approvalPolicy) state.approvalPolicy = m.approvalPolicy;
             if (m.sandbox) state.sandbox = m.sandbox;
             if (m.cwd) state.cwd = m.cwd;

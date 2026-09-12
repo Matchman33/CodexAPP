@@ -1,14 +1,14 @@
-// Shared dark theme — mirrors the web client's palette.
+// 原生客户端采用中性深色聊天主题。
 export const C = {
-  bg: "#0b1220",
-  bg2: "#0f1830",
-  card: "#15203a",
-  card2: "#1b2950",
-  line: "#243154",
-  text: "#e6ecf7",
-  muted: "#8a98b8",
-  accent: "#35d07f",
-  accent2: "#4aa8ff",
-  danger: "#ff5c6c",
-  warn: "#ffb454",
+  bg: "#212121",
+  bg2: "#171717",
+  card: "#292929",
+  card2: "#333333",
+  line: "#3b3b3b",
+  text: "#ececec",
+  muted: "#a5a5a5",
+  accent: "#69c9ab",
+  accent2: "#7db5f1",
+  danger: "#f18b8b",
+  warn: "#e6b86e",
 };

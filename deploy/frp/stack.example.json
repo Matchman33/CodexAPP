@@ -1,0 +1,8 @@
+{
+  "serverIp": "39.102.80.25",
+  "acmeEmail": "",
+  "frpPort": 7000,
+  "clients": [
+    { "id": "pc01", "httpsPort": 8443, "proxyPort": 18001, "localPort": 4123 }
+  ]
+}

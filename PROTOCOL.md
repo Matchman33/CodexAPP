@@ -20,8 +20,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 |---|---|---|
 | `hello` | `state`, `config`, `pendingApprovals[]`, `recentEvents[]` | 连接快照 |
 | `state` | `state` | 状态变化 |
-| `models` | `models[]`, `defaultModel`, `error` | 响应 `listModels`；列表可能为空或部分加载失败 |
-| `configSaved` | `requestId?` | `setConfig` 已应用，模型选择已保存到电脑端配置 |
+| `models` | `models[]`, `defaultModel`, `defaultReasoningEffort`, `error` | 响应 `listModels`；列表可能为空或部分加载失败 |
+| `configSaved` | `requestId?` | `setConfig` 已应用，模型与思考等级已保存到电脑端配置 |
 | `writerConflict` | `threadId`, `owners[]`, `message` | 会话有外部写入占用；展示进程和受影响会话，不自动结束进程 |
 | `event` | `event` | 新增一条 feed 条目 |
 | `assistantDelta` | `text` | 助手回复的流式增量（拼接显示） |
@@ -44,6 +44,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
   "readOnly": true, // 仅查看历史；发送前尝试接续，写入占用仍须确认
   "model": "…|null",
   "effectiveModel": "…|null", // 最近一次会话/任务实际使用的模型
+  "reasoningEffort": "high|null", // 已选等级，null 表示跟随默认
+  "effectiveReasoningEffort": "high|null", // 最近一次任务的实际等级
   "approvalPolicy": "on-request" | "untrusted" | "on-failure" | "never",
   "sandbox": "workspace-write" | "read-only" | "danger-full-access"
 }
@@ -87,7 +89,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `interrupt` | `threadId?`, `turnId?` | 中断指定或当前任务；后端向 Codex 传齐两个 ID |
 | `approval` | `key`, `optionId` | 回传审批决策（`optionId` ∈ approve/approveSession/deny） |
 | `newThread` | `cwd?` | 新建会话 |
-| `setConfig` | `approvalPolicy?`, `sandbox?`, `cwd?`, `model?`, `requestId?` | 改策略/模型；模型下一条消息生效，沙箱下个会话生效 |
+| `setConfig` | `approvalPolicy?`, `sandbox?`, `cwd?`, `model?`, `reasoningEffort?`, `requestId?` | 改策略、模型与思考等级；模型和等级下一条消息生效，沙箱下个会话生效 |
 | `listModels` | `cwd?` | 从电脑端 Codex 获取模型列表与该目录的默认模型 |
 | `getState` | — | 请求重新下发快照 |
 | `listThreads` | — | 请求会话/项目列表，服务端回 `projectTree` |
@@ -106,6 +108,12 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 `hello.config` 包含 `model`；`state.model` 表示已选模型 ID，`null` 表示跟随 Codex 配置。
 `models[]` 每条为 `{ model, displayName, description, isDefault }`，其中 `model` 是实际发送的 ID。列表来自 Codex `model/list`，过滤隐藏项并处理分页，不保证服务商支持每一个目录项。`defaultModel` 优先读取指定目录的有效 Codex 配置，因此可以是目录列表之外的服务商别名。
+
+每条模型另含 `supportedReasoningEfforts: [{ reasoningEffort, description }] | null` 与 `defaultReasoningEffort: string | null`。支持列表为 `null` 表示能力未知（兼容旧服务端）；空数组表示没有可选择的明确等级，两者不能混同。顶层 `models.defaultReasoningEffort` 是指定目录 Codex 配置中的默认值。
+
+`setConfig` 支持 `reasoningEffort: string | null`；省略则保留原选择，`null` 或空字符串恢复默认。等级允许小写字母开头、字母/数字/下划线/连字符，总长不超过 64；允许服务商扩展值，不将等级固定为一套枚举。已知模型只接受其支持列表内的值；能力未知或自定义模型允许显式指定，由实际调用确认支持情况。模型与等级同时校验并原子保存，失败不会部分更新，也不会返回成功确认。
+
+下一轮通过 `turn/start.effort` 显式传入所选或解析出的默认等级；不更改当前运行任务。恢复默认优先使用与模型匹配的 `config/read.config.model_reasoning_effort`，再使用模型目录默认值。接续后重新解析，避免已有会话的等级粘滞。无法解析默认且原会话已有明确等级时返回错误，要求明确选择。模型能力目录用于发送校验时每 60 秒尝试重新获取，失败保留上次成功目录，主动刷新列表会更新缓存。
 
 `setConfig` 新增可选字段 `model: string | null` 与 `requestId: string`。省略 `model` 保持原选择；空字符串或 `null` 恢复默认；其他类型、含空白或超过 200 字符的 ID 返回 `error`。自定义 ID 不要求出现在列表中。
 模型选择保存成功后才广播状态并返回 `configSaved`；错误返回原 `requestId`，客户端不应提前显示保存成功。其余配置保持原有内存设置行为，沙箱仍在新会话生效。

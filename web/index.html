@@ -2,11 +2,11 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="CodexApp" />
-  <meta name="theme-color" content="#0b1220" />
+  <meta name="theme-color" content="#ffffff" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon-180.png" />
   <link rel="icon" href="icon-180.png" />
@@ -21,12 +21,12 @@
       <p class="muted">远程控制电脑上的 Codex</p>
 
       <div class="tabs">
-        <button id="tabCloud" class="tab on">云账号（随处可用）</button>
-        <button id="tabLan" class="tab">局域网直连</button>
+        <button id="tabCloud" class="tab">云账号</button>
+        <button id="tabLan" class="tab on">中继直连</button>
       </div>
 
       <!-- Cloud (account) mode -->
-      <div id="cloudForm">
+      <div id="cloudForm" class="hidden">
         <label>邮箱</label>
         <input id="cEmail" type="email" placeholder="you@example.com" autocapitalize="off" autocorrect="off" />
         <label>密码</label>
@@ -35,19 +35,19 @@
         <button id="cRegister" class="btn secondary full">注册新账号</button>
         <button id="cResend" class="btn ghost full hidden">重新发送验证邮件</button>
         <button id="cForgot" class="btn ghost full">忘记密码？</button>
-        <p id="cMsg" class="muted small">登录后，电脑端装好 Agent 登录同一账号即可配对。内容端到端加密，服务器看不到。</p>
+        <p id="cMsg" class="muted small" role="status"></p>
       </div>
 
       <!-- LAN direct mode -->
-      <div id="lanForm" class="hidden">
+      <div id="lanForm">
         <label>中继地址</label>
-        <input id="setupUrl" type="url" inputmode="url" placeholder="http://192.168.x.x:4123" />
+        <input id="setupUrl" type="url" inputmode="url" placeholder="https://my-pc.tail123456.ts.net" />
+        <button id="usePageUrl" class="btn ghost full hidden">使用当前页面地址</button>
         <label>访问 Token</label>
         <input id="setupToken" type="text" placeholder="粘贴电脑终端显示的 Token" autocapitalize="off" autocorrect="off" />
         <button id="setupSave" class="btn primary big">连接</button>
-        <p class="muted small">同一 WiFi 直连，电脑跑 npm start 会打印地址和 Token。</p>
+        <p id="setupMsg" class="muted small" role="status"></p>
       </div>
-      <p class="muted small" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line,#243154);line-height:1.6">🔒 安全说明：全程端到端加密。服务器只转发加密数据，<b>看不到</b>你的账号内容、Codex 对话、代码与命令。</p>
     </div>
   </section>
 
@@ -101,43 +101,47 @@
   <!-- Main app -->
   <div id="app" class="app hidden">
     <header class="topbar">
-      <div class="brand">
-        <span id="connDot" class="dot"></span>
-        <strong>CodexApp</strong>
-      </div>
-      <div class="topinfo">
-        <span id="statusPill" class="pill idle">空闲</span>
-        <button id="sessionsBtn" class="icon-btn" aria-label="会话">📂</button>
-        <button id="menuBtn" class="icon-btn" aria-label="菜单">⚙</button>
-      </div>
+      <button id="sessionsBtn" class="icon-btn mobile-menu" aria-label="打开会话列表" title="会话列表"><i data-lucide="menu"></i></button>
+      <button id="modelBtn" class="model-trigger" aria-label="选择模型与思考等级" title="模型与思考等级"><strong>CodexApp</strong><span id="headerModel">默认模型</span><i data-lucide="chevron-down"></i></button>
+      <div class="topinfo"><span id="connDot" class="dot" title="连接状态"></span><span id="statusPill" class="pill idle" role="status">连接中</span></div>
+      <button id="reconnectBtn" class="icon-btn" aria-label="重新连接" title="重新连接"><i data-lucide="refresh-cw"></i></button>
+      <button id="quickNewThread" class="icon-btn" aria-label="新建会话" title="新建会话"><i data-lucide="square-pen"></i></button>
+      <button id="menuBtn" class="icon-btn" aria-label="设置" title="设置"><i data-lucide="ellipsis"></i></button>
     </header>
     <div class="subbar">
-      <span id="cwdLabel" class="muted small mono">—</span>
+      <span id="threadTitle">新对话</span><span id="cwdLabel" class="muted small mono"></span>
     </div>
 
-    <main id="feed" class="feed"></main>
+    <div class="conversation">
+      <div id="emptyState" class="empty-state"><img src="icon-180.png" alt="" width="48" height="48" /><h1>有什么可以帮忙的？</h1></div>
+      <main id="feed" class="feed" aria-label="对话内容"></main>
+      <button id="scrollBottom" class="icon-btn scroll-bottom hidden" aria-label="回到最新消息" title="回到最新消息"><i data-lucide="arrow-down"></i></button>
+    </div>
 
     <div id="approvals" class="approvals"></div>
 
-    <button id="diffBar" class="diff-bar hidden">📝 查看本次改动 (diff)</button>
+    <button id="diffBar" class="diff-bar hidden"><i data-lucide="file-diff"></i>查看本次改动</button>
 
     <footer class="composer">
       <div id="runningBar" class="running-bar hidden">
-        <span class="muted small">任务进行中…</span>
-        <button id="interruptBtn" class="btn danger small">停止</button>
+        <span class="muted small"><span class="working-dot"></span>正在处理</span>
+        <button id="interruptBtn" class="icon-btn stop-btn" aria-label="停止当前任务" title="停止当前任务"><i data-lucide="square"></i></button>
       </div>
-      <div class="input-row">
-        <textarea id="input" rows="1" placeholder="输入提示词，控制 Codex…"></textarea>
-        <button id="sendBtn" class="btn primary">发送</button>
+      <div class="composer-box">
+        <textarea id="input" rows="1" placeholder="发送消息" aria-label="消息"></textarea>
+        <div class="composer-tools">
+          <button id="effortBtn" class="effort-trigger" title="选择思考等级"><i data-lucide="sliders-horizontal"></i><span id="effortLabel">默认思考</span></button>
+          <label class="steer-toggle" title="向正在运行的任务补充指令"><input type="checkbox" id="steerMode" role="switch" />纠偏</label>
+          <button id="sendBtn" class="icon-btn send-btn" aria-label="发送消息" title="发送消息"><i data-lucide="arrow-up"></i></button>
+        </div>
       </div>
-      <label class="steer-toggle"><input type="checkbox" id="steerMode" /> 纠偏模式（插话当前任务）</label>
     </footer>
   </div>
 
   <!-- Settings sheet -->
   <div id="sheet" class="sheet hidden">
-    <div class="sheet-card">
-      <h2>设置</h2>
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="sheet-header"><h2 id="settingsTitle">设置</h2><button id="sheetClose" class="icon-btn" aria-label="关闭设置" title="关闭"><i data-lucide="x"></i></button></div>
       <label>工作目录 (cwd)</label>
       <input id="cfgCwd" type="text" class="mono" autocapitalize="off" autocorrect="off" />
       <label for="cfgModel">模型</label>
@@ -146,13 +150,17 @@
           <option value="default">Codex 默认</option>
           <option value="custom">自定义模型</option>
         </select>
-        <button id="modelsRefresh" class="icon-btn" title="刷新模型列表" aria-label="刷新模型列表">&#8635;</button>
+        <button id="modelsRefresh" class="icon-btn" title="刷新模型列表" aria-label="刷新模型列表"><i data-lucide="refresh-cw"></i></button>
       </div>
       <div id="customModelRow" class="hidden">
         <label for="cfgCustomModel">模型 ID</label>
         <input id="cfgCustomModel" class="mono" type="text" maxlength="200" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </div>
       <p id="modelsStatus" class="muted small" role="status" aria-live="polite"></p>
+      <label for="cfgEffort">思考等级</label>
+      <select id="cfgEffort" aria-label="思考等级"><option value="">Codex 默认</option></select>
+      <div id="customEffortRow" class="hidden"><label for="cfgCustomEffort">自定义思考等级</label><input id="cfgCustomEffort" type="text" maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="例如 high" /></div>
+      <label for="cfgTheme">外观</label><select id="cfgTheme"><option value="light">浅色</option><option value="dark">深色</option><option value="system">跟随系统</option></select>
       <label>审批策略</label>
       <select id="cfgApproval">
         <option value="on-request">on-request（按需，推荐）</option>
@@ -175,17 +183,18 @@
       <p id="memberStatus" class="muted small"></p>
       <button id="redeemBtn" class="btn secondary full hidden">兑换 / 续费会员</button>
       <button id="forget" class="btn ghost full">退出/忘记连接</button>
-      <button id="sheetClose" class="btn ghost full">关闭</button>
     </div>
   </div>
 
   <!-- Sessions / projects sheet -->
-  <div id="sessionsSheet" class="sheet hidden">
-    <div class="sheet-card">
-      <h2>会话 / 项目</h2>
-      <div id="sessionsList" class="sessions-list"></div>
-      <button id="sessionsRefresh" class="btn secondary full">刷新</button>
-      <button id="sessionsClose" class="btn ghost full">关闭</button>
+  <div id="sessionsSheet" class="sheet sessions-sheet hidden">
+    <aside class="sidebar" aria-label="会话与项目">
+      <div class="sheet-header"><strong>CodexApp</strong><button id="sessionsRefresh" class="icon-btn" aria-label="刷新会话列表" title="刷新会话列表"><i data-lucide="refresh-cw"></i></button><button id="sessionsClose" class="icon-btn mobile-menu" aria-label="关闭会话列表" title="关闭"><i data-lucide="x"></i></button></div>
+      <button id="sidebarNewThread" class="sidebar-command"><i data-lucide="square-pen"></i>新对话</button>
+      <label class="session-search"><i data-lucide="search"></i><input id="sessionSearch" type="search" placeholder="搜索对话" aria-label="搜索对话" /></label>
+      <div id="sessionsList" class="sessions-list"><p class="muted small">等待连接</p></div>
+      <button id="sidebarSettings" class="sidebar-command sidebar-settings"><i data-lucide="settings-2"></i>设置</button>
+    </aside>
     </div>
   </div>
 
@@ -221,6 +230,7 @@
 
   <script src="vendor/nacl.js"></script>
   <script src="e2e.js"></script>
+  <script src="vendor/chat-ui.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

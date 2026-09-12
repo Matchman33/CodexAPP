@@ -6,5 +6,6 @@
   "defaultCwd": "",
   "approvalPolicy": "on-request",
   "sandbox": "workspace-write",
-  "model": null
+  "model": null,
+  "reasoningEffort": null
 }

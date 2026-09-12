@@ -31,6 +31,10 @@ dist/
 dist-check/
 **/dist-check/
 web-build/
+web/vendor/chat-ui.js
+
+# frp 本地配置、部署密钥、客户端包与证书
+deploy/frp/runtime/
 
 # Native build outputs (archived projects)
 **/build/

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   View, Text, TextInput, Pressable, FlatList, StyleSheet,
-  KeyboardAvoidingView, Platform, StatusBar, SafeAreaView, Alert,
+  KeyboardAvoidingView, Platform, StatusBar, SafeAreaView, Alert, Switch,
 } from "react-native";
 import { C } from "./theme";
 import ApprovalCard from "./ApprovalCard";
@@ -11,6 +11,7 @@ import DiffModal from "./DiffModal";
 import MembershipScreen from "./MembershipScreen";
 import WriterConflictModal from "./WriterConflictModal";
 import { ensureNotifPermission } from "./useRelay";
+import Feather from "@expo/vector-icons/Feather";
 
 const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
 
@@ -36,8 +37,7 @@ function EventRow({ e }) {
   if (k === "item:agentMessage") {
     return (
       <View style={[s.bubble, s.assistant]}>
-        <Text style={s.label}>CODEX</Text>
-        <Text style={s.bodyText}>{e.text}</Text>
+        <Text selectable style={s.bodyText}>{e.text}</Text>
       </View>
     );
   }
@@ -87,7 +87,7 @@ export default function MainScreen({ relay, onForget }) {
 
   const send = () => {
     const t = text.trim();
-    if (!t) return;
+    if (!t || !connected || (running && !steerMode)) return;
     if (steerMode) actions.steer(t);
     else if (!actions.prompt(t)) return;
     if (relayState.readOnly) pendingText.current = { text: t, ids: new Set(events.map((e) => e.id)) };
@@ -106,23 +106,20 @@ export default function MainScreen({ relay, onForget }) {
 
   return (
     <SafeAreaView style={s.safe}>
+      <StatusBar barStyle="light-content" />
       <View style={s.root}>
         {/* Header */}
         <View style={s.header}>
-          <View style={s.brand}>
-            <View style={[s.dot, { backgroundColor: connected ? C.accent : C.danger }]} />
+          <Pressable accessibilityLabel="打开会话列表" onPress={openSessions} style={s.iconButton}><Feather name="menu" size={22} color={C.text} /></Pressable>
+          <Pressable style={s.brand} accessibilityLabel="选择模型和思考等级" onPress={() => { actions.listModels(relayState.cwd); setShowSettings(true); }}>
             <Text style={s.title}>CodexApp</Text>
-          </View>
+            <Feather name="chevron-down" size={16} color={C.muted} />
+          </Pressable>
           <View style={s.headerRight}>
-            <View style={[s.pill, running ? s.pillRun : s.pillIdle]}>
-              <Text style={[s.pillText, running && { color: "#042", fontWeight: "700" }]}>{connLabel}</Text>
-            </View>
-            <Pressable onPress={openSessions} hitSlop={10}>
-              <Text style={s.gear}>📂</Text>
-            </Pressable>
-            <Pressable onPress={() => { actions.listModels(relayState.cwd); setShowSettings(true); }} hitSlop={10}>
-              <Text style={s.gear}>⚙</Text>
-            </Pressable>
+            <View style={[s.dot, { backgroundColor: connected ? C.accent : C.danger }]} />
+            <Text style={s.pillText}>{connLabel}</Text>
+            <Pressable accessibilityLabel="新建会话" disabled={!connected || running} onPress={() => actions.newThread()} style={s.iconButton}><Feather name="edit" size={21} color={!connected || running ? C.muted : C.text} /></Pressable>
+            <Pressable accessibilityLabel="设置" onPress={() => { actions.listModels(relayState.cwd); setShowSettings(true); }} style={s.iconButton}><Feather name="more-horizontal" size={22} color={C.text} /></Pressable>
           </View>
         </View>
         <Text style={s.subbar} numberOfLines={1}>
@@ -140,12 +137,13 @@ export default function MainScreen({ relay, onForget }) {
           <FlatList
             key={relayState.threadId || "new"}
             style={s.feed}
-            contentContainerStyle={{ padding: 12, gap: 8 }}
-            inverted
+            contentContainerStyle={{ padding: 20, gap: 20, flexGrow: 1 }}
+            inverted={events.length > 0}
             data={events.slice().reverse()}
             keyExtractor={(e, i) => e.id || String(i)}
             renderItem={({ item }) => <EventRow e={item} />}
             initialNumToRender={20}
+            ListEmptyComponent={<View style={s.emptyState}><Feather name="message-circle" size={32} color={C.text} /><Text style={s.emptyTitle}>有什么可以帮忙的？</Text></View>}
           />
 
           {/* Approvals */}
@@ -160,7 +158,7 @@ export default function MainScreen({ relay, onForget }) {
           {/* Diff bar */}
           {!!diff && (
             <Pressable style={s.diffBar} onPress={() => setShowDiff(true)}>
-              <Text style={s.diffBarText}>📝 查看本次改动 (diff)</Text>
+              <Feather name="file-text" size={16} color={C.accent2} /><Text style={s.diffBarText}>查看本次改动</Text>
             </Pressable>
           )}
 
@@ -168,29 +166,27 @@ export default function MainScreen({ relay, onForget }) {
           <View style={s.composer}>
             {running && (
               <View style={s.runningBar}>
-                <Text style={s.muted}>任务进行中…</Text>
-                <Pressable style={s.stopBtn} onPress={actions.interrupt}>
-                  <Text style={s.stopText}>停止</Text>
+                <Text style={s.muted}>正在处理</Text>
+                <Pressable accessibilityLabel="停止当前任务" style={s.stopBtn} onPress={actions.interrupt}>
+                  <Feather name="square" size={16} color={C.bg} />
                 </Pressable>
               </View>
             )}
-            <View style={s.inputRow}>
+            <View style={s.composerBox}>
               <TextInput
                 style={s.input}
                 value={text}
                 onChangeText={setText}
-                placeholder={steerMode ? "纠偏：插话当前任务…" : "输入提示词，控制 Codex…"}
+                placeholder={steerMode ? "补充当前任务" : "发送消息"}
                 placeholderTextColor={C.muted}
                 multiline
               />
-              <Pressable style={s.sendBtn} onPress={send}>
-                <Text style={s.sendText}>{steerMode ? "纠偏" : "发送"}</Text>
-              </Pressable>
+              <View style={s.inputRow}>
+                <Pressable style={s.effortButton} accessibilityLabel="选择思考等级" onPress={() => { actions.listModels(relayState.cwd); setShowSettings(true); }}><Feather name="sliders" size={16} color={C.muted} /><Text numberOfLines={1} style={[s.muted, { flexShrink: 1 }]}>{({ low: "低", medium: "中等", high: "高", xhigh: "特高", max: "最高", ultra: "极致", minimal: "极低", none: "关闭思考" })[relayState.reasoningEffort] || relayState.reasoningEffort || "默认思考"}</Text></Pressable>
+                <Text style={s.muted}>纠偏</Text><Switch accessibilityLabel="纠偏模式" value={steerMode} onValueChange={setSteerMode} trackColor={{ false: C.line, true: C.accent }} style={{ transform: [{ scale: 0.7 }], marginHorizontal: -6 }} />
+                <Pressable accessibilityLabel="发送消息" disabled={!connected || !text.trim() || (running && !steerMode)} style={[s.sendBtn, (!connected || !text.trim() || (running && !steerMode)) && { opacity: 0.35 }]} onPress={send}><Feather name="arrow-up" size={22} color={C.bg} /></Pressable>
+              </View>
             </View>
-            <Pressable style={s.steerToggle} onPress={() => setSteerMode((v) => !v)}>
-              <View style={[s.checkbox, steerMode && s.checkboxOn]}>{steerMode && <Text style={s.check}>✓</Text>}</View>
-              <Text style={s.muted}>纠偏模式（插话当前任务）</Text>
-            </Pressable>
           </View>
         </KeyboardAvoidingView>
 
@@ -213,6 +209,9 @@ export default function MainScreen({ relay, onForget }) {
         <SessionsModal
           visible={showSessions}
           tree={tree}
+          activeThreadId={relayState.threadId}
+          onNewThread={() => { if (!connected || running) return; actions.newThread(); setShowSessions(false); }}
+          onSettings={() => { setShowSessions(false); actions.listModels(relayState.cwd); setShowSettings(true); }}
           onResume={(id) => { actions.readThread(id); setShowSessions(false); }}
           onRefresh={() => actions.listThreads()}
           onClose={() => setShowSessions(false)}
@@ -227,40 +226,45 @@ export default function MainScreen({ relay, onForget }) {
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg, paddingTop: Platform.OS === "android" ? StatusBar.currentHeight : 0 },
   root: { flex: 1, backgroundColor: C.bg },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingTop: 10, paddingBottom: 8, borderBottomColor: C.line, borderBottomWidth: 1 },
-  brand: { flexDirection: "row", alignItems: "center", gap: 8 },
-  dot: { width: 10, height: 10, borderRadius: 5 },
-  title: { color: C.text, fontSize: 18, fontWeight: "700" },
-  headerRight: { flexDirection: "row", alignItems: "center", gap: 10 },
+  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 8, paddingTop: 8, paddingBottom: 8, minHeight: 56 },
+  brand: { flexDirection: "row", alignItems: "center", gap: 4 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  title: { color: C.text, fontSize: 17, fontWeight: "600" },
+  headerRight: { flexDirection: "row", alignItems: "center", gap: 4, marginLeft: "auto" },
+  iconButton: { width: 36, height: 40, alignItems: "center", justifyContent: "center" },
   pill: { borderRadius: 999, borderWidth: 1, paddingVertical: 4, paddingHorizontal: 10 },
   pillIdle: { borderColor: C.line },
   pillRun: { backgroundColor: C.accent, borderColor: C.accent },
   pillText: { color: C.muted, fontSize: 12 },
   gear: { color: C.text, fontSize: 22 },
-  subbar: { color: C.muted, fontSize: 12, paddingHorizontal: 14, paddingVertical: 6, borderBottomColor: C.line, borderBottomWidth: 1, fontFamily: MONO },
+  subbar: { color: C.muted, fontSize: 10, paddingHorizontal: 20, paddingBottom: 8, fontFamily: MONO },
   feed: { flex: 1 },
   sysLine: { color: C.muted, fontSize: 12, textAlign: "center", paddingVertical: 2 },
-  bubble: { borderRadius: 12, padding: 10 },
-  user: { backgroundColor: C.card2, alignSelf: "flex-end", maxWidth: "88%" },
+  bubble: { borderRadius: 8, padding: 10 },
+  user: { backgroundColor: C.card2, alignSelf: "flex-end", maxWidth: "86%", borderRadius: 22, paddingHorizontal: 16 },
   userText: { color: C.text },
-  assistant: { backgroundColor: C.card },
-  label: { color: C.muted, fontSize: 11, marginBottom: 3, letterSpacing: 0.5 },
-  bodyText: { color: C.text, lineHeight: 20 },
-  cmd: { backgroundColor: "#0d1526", borderColor: C.line, borderWidth: 1 },
-  tool: { backgroundColor: "#101c33", borderColor: C.line, borderWidth: 1 },
-  error: { backgroundColor: "#2a1620", borderColor: C.danger, borderWidth: 1 },
+  assistant: { backgroundColor: "transparent", padding: 0 },
+  label: { color: C.muted, fontSize: 11, marginBottom: 3 },
+  bodyText: { color: C.text, lineHeight: 25 },
+  cmd: { backgroundColor: C.bg2, borderColor: C.line, borderWidth: 1 },
+  tool: { backgroundColor: C.bg2, borderColor: C.line, borderWidth: 1 },
+  error: { backgroundColor: C.card, borderColor: C.danger, borderWidth: 1 },
   errorText: { color: C.danger },
   approvals: { paddingHorizontal: 12, paddingTop: 8 },
-  diffBar: { marginHorizontal: 12, marginBottom: 8, padding: 11, borderRadius: 10, borderWidth: 1, borderColor: C.accent2, backgroundColor: "#0d1c33" },
+  diffBar: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 16, marginBottom: 8, padding: 10, borderRadius: 6, borderWidth: 1, borderColor: C.line, backgroundColor: C.bg2 },
   diffBarText: { color: C.accent2, fontWeight: "700", fontSize: 14 },
-  composer: { borderTopColor: C.line, borderTopWidth: 1, padding: 10, paddingBottom: Platform.OS === "ios" ? 18 : 10 },
+  composer: { padding: 16, paddingTop: 8, paddingBottom: Platform.OS === "ios" ? 18 : 10 },
+  composerBox: { borderWidth: 1, borderColor: C.line, borderRadius: 26, padding: 12 },
+  effortButton: { flexDirection: "row", alignItems: "center", gap: 6, marginRight: "auto", maxWidth: "42%" },
+  emptyState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 16 },
+  emptyTitle: { color: C.text, fontSize: 22, fontWeight: "600" },
   runningBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: 6 },
   muted: { color: C.muted, fontSize: 13 },
-  stopBtn: { borderColor: C.danger, borderWidth: 1, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 14 },
+  stopBtn: { backgroundColor: C.text, borderRadius: 16, width: 32, height: 32, alignItems: "center", justifyContent: "center" },
   stopText: { color: C.danger, fontWeight: "700" },
   inputRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
-  input: { flex: 1, backgroundColor: C.bg2, color: C.text, borderColor: C.line, borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 16, maxHeight: 120 },
-  sendBtn: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 18, paddingVertical: 12 },
+  input: { backgroundColor: "transparent", color: C.text, paddingHorizontal: 4, paddingBottom: 12, fontSize: 16, minHeight: 40, maxHeight: 160 },
+  sendBtn: { backgroundColor: C.text, borderRadius: 18, width: 36, height: 36, alignItems: "center", justifyContent: "center", marginLeft: "auto" },
   sendText: { color: "#042", fontWeight: "800", fontSize: 15 },
   steerToggle: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },
   checkbox: { width: 18, height: 18, borderRadius: 4, borderColor: C.line, borderWidth: 1, alignItems: "center", justifyContent: "center" },

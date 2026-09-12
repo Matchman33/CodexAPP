@@ -5,6 +5,7 @@ import { fmtMember } from "./membership";
 
 const POLICIES = ["on-request", "untrusted", "on-failure", "never"];
 const SANDBOXES = ["workspace-write", "read-only", "danger-full-access"];
+const EFFORTS = { none: "关闭思考", minimal: "极低", low: "低", medium: "中等", high: "高", xhigh: "特高", max: "最高", ultra: "极致" };
 
 function Chips({ value, options, onPick }) {
   return (
@@ -28,6 +29,8 @@ export default function SettingsModal({ visible, config, models, onRefreshModels
   const [model, setModel] = useState("default");
   const [customModel, setCustomModel] = useState("");
   const [modelMenu, setModelMenu] = useState(false);
+  const [effort, setEffort] = useState("");
+  const [effortMenu, setEffortMenu] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -38,6 +41,7 @@ export default function SettingsModal({ visible, config, models, onRefreshModels
       setSandbox(config.sandbox || "workspace-write");
       setModel(config.model ? (models.models.some((m) => m.model === config.model) ? "model:" + config.model : "custom") : "default");
       setCustomModel(config.model || "");
+      setEffort(config.reasoningEffort || ""); setEffortMenu(false);
       setModelMenu(false); setSaving(false); setError("");
     }
   }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -53,10 +57,22 @@ export default function SettingsModal({ visible, config, models, onRefreshModels
     if (model === "custom" && (!selected || /\s|[\x00-\x1f\x7f]/.test(selected))) { setError("请输入有效的模型 ID"); return; }
     setSaving(true); setError("");
     try {
-      await (create ? onNewThread : onApply)({ cwd: cwd.trim() || undefined, approvalPolicy: policy, sandbox, model: selected });
+      if (effort && !/^[a-z][a-z0-9_-]{0,63}$/.test(effort)) throw new Error("无效的思考等级");
+      await (create ? onNewThread : onApply)({ cwd: cwd.trim() || undefined, approvalPolicy: policy, sandbox, model: selected, reasoningEffort: effort || null });
     } catch (e) { setError(e.message || String(e)); }
     finally { setSaving(false); }
   };
+
+  const modelId = model === "default" ? models.defaultModel : model === "custom" ? customModel.trim() : model.slice(6);
+  useEffect(() => {
+    if (model === "custom" && models.models.some((m) => m.model === customModel.trim())) setModel("model:" + customModel.trim());
+  }, [model, customModel, models.models]);
+  const entry = models.models.find((m) => m.model === modelId);
+  const knownEfforts = Array.isArray(entry?.supportedReasoningEfforts);
+  const levels = knownEfforts ? entry.supportedReasoningEfforts.map((o) => o.reasoningEffort) : Object.keys(EFFORTS);
+  const defaultEffort = (model === "default" ? models.defaultReasoningEffort : null) || entry?.defaultReasoningEffort;
+  const effortOptions = [{ value: "", label: defaultEffort ? "Codex 默认（" + (EFFORTS[defaultEffort] || defaultEffort) + "）" : "Codex 默认" }, ...levels.map((value) => ({ value, label: EFFORTS[value] || value }))];
+  useEffect(() => { if (knownEfforts && effort && !levels.includes(effort)) setEffort(""); }, [modelId, models.models]);
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -95,6 +111,13 @@ export default function SettingsModal({ visible, config, models, onRefreshModels
               </>
             )}
             {!!(models.loading || models.error || !models.models.length) && <Text style={s.label}>{models.loading ? "加载中…" : models.error ? "模型列表加载不完整：" + models.error : "暂无可选模型"}</Text>}
+
+            <Text style={s.label}>思考等级</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="选择思考等级" accessibilityState={{ expanded: effortMenu }} style={[s.input, s.modelSelect]} onPress={() => setEffortMenu((v) => !v)}>
+              <Text style={s.modelText}>{effortOptions.find((o) => o.value === effort)?.label || effort}</Text>
+            </Pressable>
+            {effortMenu && <ScrollView style={s.modelMenu} nestedScrollEnabled>{effortOptions.map((o) => <Pressable key={o.value} accessibilityRole="radio" accessibilityState={{ checked: effort === o.value }} style={s.modelOption} onPress={() => { setEffort(o.value); setEffortMenu(false); }}><Text style={[s.modelText, { color: effort === o.value ? C.accent : C.text }]}>{o.label}</Text></Pressable>)}</ScrollView>}
+            {!knownEfforts && <TextInput accessibilityLabel="自定义思考等级" style={[s.input, { marginTop: 6 }]} value={effort} onChangeText={setEffort} maxLength={64} autoCapitalize="none" autoCorrect={false} placeholder="自定义等级" placeholderTextColor={C.muted} />}
 
             <Text style={s.label}>审批策略</Text>
             <Chips value={policy} options={POLICIES} onPick={setPolicy} />

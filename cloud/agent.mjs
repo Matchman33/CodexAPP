@@ -50,6 +50,7 @@ const CLOUD_BROKER = (process.env.CODEXAPP_BROKER || "https://broker.the5288.cn"
 const DEFAULTS = {
   email: "", password: "", codexBin: "",
   defaultCwd: os.homedir(), approvalPolicy: "on-request", sandbox: "workspace-write", model: null,
+  reasoningEffort: null,
   originator: "codex_vscode", panelPort: 7878,
   preventSleep: true,
   // "open" = 同账号免码直连(像 TeamViewer);"code" = 需要配对码(更安全,防中间人)
@@ -122,7 +123,7 @@ const bridge = new CodexBridge(config, (msg) => {
   // CodexApp data only flows to a PAIRED phone.
   if (!trusted || !phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type: "e2e", ...seal(msg, phonePubkey, keys.secretKey) }));
-}, (model) => persistModel(CONFIG_FILE, model));
+}, (model, settings) => persistModel(CONFIG_FILE, model, settings));
 
 function sendCtrl(obj) {
   if (!phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;

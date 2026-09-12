@@ -76,18 +76,18 @@ export function useRelay(profile, keypair) {
         clearTimeout(writerTimer.current); writerRequest.current = null;
         setWriterConflict(null); setWriterBusy(false); setWriterError("");
         setRelayState(m.state || {});
-        if (m.config) setConfig((c) => ({ ...c, ...m.config, model: m.state?.model ?? null }));
+        if (m.config) setConfig((c) => ({ ...c, ...m.config, model: m.state?.model ?? null, reasoningEffort: m.state?.reasoningEffort ?? null }));
         setEvents((m.recentEvents || []).map((e) => ({ ...e })));
         setApprovals(m.pendingApprovals || []);
         setDiff(m.diff || "");
         break;
       case "state":
         setRelayState(m.state || {});
-        if (m.state) setConfig((c) => ({ ...c, cwd: m.state.cwd, approvalPolicy: m.state.approvalPolicy, sandbox: m.state.sandbox, model: m.state.model ?? null }));
+        if (m.state) setConfig((c) => ({ ...c, cwd: m.state.cwd, approvalPolicy: m.state.approvalPolicy, sandbox: m.state.sandbox, model: m.state.model ?? null, reasoningEffort: m.state.reasoningEffort ?? null }));
         break;
       case "models":
         clearTimeout(modelsTimer.current);
-        setModels({ models: m.models || [], defaultModel: m.defaultModel || null, loading: false, error: m.error || "" });
+        setModels({ models: m.models || [], defaultModel: m.defaultModel || null, defaultReasoningEffort: m.defaultReasoningEffort || null, loading: false, error: m.error || "" });
         break;
       case "writerConflict":
         clearTimeout(writerTimer.current); writerRequest.current = null;

@@ -174,7 +174,7 @@ test("sending from history resumes on demand without creating a different conver
   await bridge.dispatch({ type: "prompt", text: "continue" });
   assert.equal(bridge.state.readOnly, false);
   assert.equal(calls.some((c) => c.method === "thread/start"), false);
-  assert.deepEqual(calls.filter((c) => c.method !== "thread/read").map((c) => c.method), ["thread/resume", "turn/start"]);
+  assert.deepEqual(calls.filter((c) => c.method.startsWith("thread/") && c.method !== "thread/read" || c.method === "turn/start").map((c) => c.method), ["thread/resume", "turn/start"]);
   assert.equal(calls.at(-1).params.threadId, "one");
 });
 

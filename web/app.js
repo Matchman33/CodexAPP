@@ -8,11 +8,34 @@ const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
 
 let ws = null;
 let backoff = 1000;
+let reconnectTimer = null;
+let connectionTimer = null;
+let loginAbort = null;
+let connectionAttempt = 0;
+let connectionWanted = false;
+let sessionReady = false;
+let connectionLabel = "连接中…";
+let hostedRelay = false;
+let setupModeChosen = false;
+const CONNECT_TIMEOUT = 12000;
 let liveAssistant = null;   // the streaming assistant bubble (or null)
 const eventRows = new Map();
 let appState = {};
 let modelCatalog = [];
 let defaultModel = null;
+let defaultReasoningEffort = null;
+let lastProjectTree = null;
+let followLatest = true;
+let deltaFrame = null;
+const effortNames = { none: "关闭思考", minimal: "极低", low: "低", medium: "中等", high: "高", xhigh: "特高", max: "最高", ultra: "极致" };
+const effortName = (value) => effortNames[value] || value || "默认思考";
+const colorScheme = matchMedia("(prefers-color-scheme: dark)");
+function applyTheme(value = localStorage.getItem("codexapp.theme") || "light") {
+  document.documentElement.dataset.theme = value === "system" ? (colorScheme.matches ? "dark" : "light") : value;
+  $("cfgTheme").value = value;
+  document.querySelector('meta[name="theme-color"]').content = document.documentElement.dataset.theme === "dark" ? "#212121" : "#ffffff";
+}
+colorScheme.addEventListener("change", () => applyTheme());
 let modelsTimer = null;
 let configTimer = null;
 let pendingConfig = null;
@@ -56,19 +79,45 @@ function profileReady(p) {
 function start() {
   if (profileReady(profile)) { showApp(); connect(); }
   else { showSetup(); }
+  detectHost();
+}
+async function detectHost() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await fetch("/health", { signal: controller.signal, cache: "no-store" });
+    if (!response.ok) return;
+    const data = await response.json();
+    hostedRelay = data.ok === true && typeof data.codexConnected === "boolean";
+    $("usePageUrl").classList.toggle("hidden", !hostedRelay);
+    if (hostedRelay && profile.mode === "cloud" && connectionWanted) {
+      stopConnection(); showSetup(); switchTab("lan");
+      $("setupUrl").value = location.origin;
+      $("setupMsg").textContent = "当前是电脑中继入口，请使用访问 Token 连接，无需云账号登录";
+      return;
+    }
+    if ((hostedRelay || data.ok === true && typeof data.rooms === "number") && !profileReady(profile) && !setupModeChosen && !$("setup").classList.contains("hidden")) {
+      switchTab(hostedRelay ? "lan" : "cloud");
+      if (hostedRelay && !$("setupUrl").value) $("setupUrl").value = location.origin;
+    }
+  } catch {} finally { clearTimeout(timer); }
 }
 function showSetup() {
   hideAllScreens();
   $("setup").classList.remove("hidden");
   if (profile.email) $("cEmail").value = profile.email;
   if (profile.url) $("setupUrl").value = profile.url;
+  else if (hostedRelay) $("setupUrl").value = location.origin;
+  switchTab(profile.mode || "lan");
 }
 function hideAllScreens() {
+  document.body.classList.remove("app-ready");
   ["setup", "register", "pairing", "membership", "app"].forEach((id) => $(id).classList.add("hidden"));
 }
 function showApp() {
   hideAllScreens();
   $("app").classList.remove("hidden");
+  document.body.classList.add("app-ready");
   $("redeemBtn").classList.toggle("hidden", profile.mode !== "cloud");
   updateMemberStatus();
 }
@@ -94,7 +143,7 @@ function fmtMember(until) {
 }
 function updateMemberStatus() {
   const el = $("memberStatus");
-  if (el) el.textContent = profile.mode === "cloud" ? "会员：" + fmtMember(memberUntil) : "局域网模式（免费）";
+  if (el) el.textContent = profile.mode === "cloud" ? "会员：" + fmtMember(memberUntil) : "中继直连（免费）";
 }
 function showMembership(msg) {
   hideAllScreens();
@@ -125,6 +174,7 @@ $("mLan").onclick = () => { hideMembership(); showSetup(); switchTab("lan"); };
 $("mClose").onclick = () => { hideMembership(); if (membershipBlocked) showSetup(); else showApp(); };
 $("redeemBtn").onclick = () => { $("sheet").classList.add("hidden"); showMembership(); };
 function loginFailed(msg, resend) {
+  stopConnection();
   showSetup();
   switchTab("cloud");
   $("cMsg").textContent = msg;
@@ -137,13 +187,15 @@ function switchTab(m) {
   $("cloudForm").classList.toggle("hidden", m !== "cloud");
   $("lanForm").classList.toggle("hidden", m !== "lan");
 }
-$("tabCloud").onclick = () => switchTab("cloud");
-$("tabLan").onclick = () => switchTab("lan");
+$("tabCloud").onclick = () => { setupModeChosen = true; switchTab("cloud"); };
+$("tabLan").onclick = () => { setupModeChosen = true; switchTab("lan"); };
+$("usePageUrl").onclick = () => { if (hostedRelay) $("setupUrl").value = location.origin; };
 
 function doCloud() {
   const email = $("cEmail").value.trim();
   const password = $("cPass").value;
   if (!email || !password) { $("cMsg").textContent = "请填邮箱和密码"; return; }
+  membershipBlocked = false; authToken = null;
   saveProfile({ mode: "cloud", email, password });
   showApp(); connect(); // pairing (if needed) is a step AFTER login, driven by the WS
 }
@@ -201,7 +253,9 @@ $("pLogout").onclick = () => forget();
 $("setupSave").onclick = () => {
   const url = $("setupUrl").value.trim().replace(/\/+$/, "");
   const token = $("setupToken").value.trim();
-  if (!url || !token) return;
+  if (!url || !token) { $("setupMsg").textContent = "请填写中继地址和 Token"; return; }
+  try { relaySocketUrl(url, token); }
+  catch (error) { $("setupMsg").textContent = error.message; return; }
   saveProfile({ mode: "lan", url, token });
   showApp(); connect();
 };
@@ -210,62 +264,137 @@ $("setupSave").onclick = () => {
 // Connection (dual transport)
 // ---------------------------------------------------------------------------
 function connect() {
+  connectionWanted = true;
+  disposeConnection();
+  if (profile.mode === "lan") membershipBlocked = false;
+  if (!profileReady(profile) || membershipBlocked) return;
+  if (!navigator.onLine) { setConn(false, "网络已离线"); return; }
+  const attempt = connectionAttempt;
   setConn(false, "连接中…");
-  if (profile.mode === "cloud") connectCloud();
-  else connectLan();
+  armConnectionTimeout(attempt);
+  if (profile.mode === "cloud") connectCloud(attempt);
+  else connectLan(attempt);
 }
 
-function connectLan() {
-  try {
-    ws = new WebSocket(profile.url.replace(/^http/, "ws") + "/ws?token=" + encodeURIComponent(profile.token));
-  } catch { scheduleReconnect(); return; }
-  ws.onopen = () => { backoff = 1000; };
-  ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch { return; } handle(m); };
-  ws.onclose = (ev) => { setConn(false, ev.code === 4001 ? "Token 无效" : "已断开"); if (ev.code === 4001) { forget(); return; } scheduleReconnect(); };
-  ws.onerror = () => { try { ws.close(); } catch {} };
-}
-
-async function connectCloud() {
+function disposeConnection() {
+  connectionAttempt++;
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  clearTimeout(connectionTimer); connectionTimer = null;
+  if (loginAbort) { loginAbort.abort(); loginAbort = null; }
+  const previous = ws;
+  ws = null;
+  sessionReady = false;
   agentPub = null; paired = false;
+  if (previous) {
+    previous.onopen = previous.onmessage = previous.onclose = previous.onerror = null;
+    try { previous.close(); } catch {}
+  }
+}
+function stopConnection() {
+  connectionWanted = false;
+  disposeConnection();
+  updateComposer();
+}
+function armConnectionTimeout(attempt) {
+  clearTimeout(connectionTimer);
+  connectionTimer = setTimeout(() => {
+    if (attempt === connectionAttempt) scheduleReconnect("连接超时，正在重试");
+  }, CONNECT_TIMEOUT);
+}
+function relaySocketUrl(url, token) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error("中继地址必须是完整的 HTTP 或 HTTPS 地址"); }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error("中继地址必须使用 HTTP 或 HTTPS，且不能包含账号密码");
+  }
+  if (location.protocol === "https:" && parsed.protocol !== "https:") {
+    throw new Error("HTTPS 页面不能连接 HTTP 中继，请改用 Serve 的 HTTPS 地址");
+  }
+  parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "") + "/ws";
+  parsed.search = ""; parsed.hash = "";
+  parsed.searchParams.set("token", token);
+  return parsed.href;
+}
+function connectLan(attempt) {
+  let url;
+  try { url = relaySocketUrl(profile.url, profile.token); }
+  catch (error) {
+    stopConnection(); showSetup(); $("setupMsg").textContent = error.message; return;
+  }
+  let socket;
+  try { socket = ws = new WebSocket(url); }
+  catch { scheduleReconnect("无法建立连接，正在重试"); return; }
+  socket.onmessage = (ev) => {
+    if (attempt !== connectionAttempt) return;
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    handle(m);
+  };
+  socket.onclose = (ev) => {
+    if (attempt !== connectionAttempt) return;
+    if (ev.code === 4001) {
+      stopConnection(); showSetup(); $("setupMsg").textContent = "Token 无效，请重新填写电脑终端中的 Token"; return;
+    }
+    scheduleReconnect();
+  };
+  socket.onerror = () => { if (attempt === connectionAttempt) scheduleReconnect("网络连接失败，正在重试"); };
+}
+
+async function connectCloud(attempt) {
   let token;
+  const controller = new AbortController();
+  loginAbort = controller;
   try {
-    const r = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: profile.email, password: profile.password }) });
+    const r = await fetch("/api/login", { method: "POST", signal: controller.signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ email: profile.email, password: profile.password }) });
+    if (attempt !== connectionAttempt) return;
     if (r.status === 401) { loginFailed("账号或密码错误"); return; }
     if (r.status === 403) { loginFailed("请先验证邮箱（注册后点邮件里的链接）", true); return; }
     if (!r.ok) { scheduleReconnect(); return; }
     const data = await r.json();
+    if (attempt !== connectionAttempt) return;
+    loginAbort = null;
     token = data.token; authToken = token; memberUntil = data.membershipUntil || 0;
     updateMemberStatus();
-  } catch { scheduleReconnect(); return; }
+  } catch { if (attempt === connectionAttempt) scheduleReconnect(); return; }
 
   // Not a member → show the upgrade screen instead of (uselessly) hitting the gate.
-  if (memberUntil <= Date.now()) { membershipBlocked = true; showMembership("云端会员未开通或已过期，输入兑换码即可开通。"); return; }
+  if (memberUntil <= Date.now()) { membershipBlocked = true; stopConnection(); showMembership("云端会员未开通或已过期，输入兑换码即可开通。"); return; }
 
-  try { ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/link"); }
+  let socket;
+  try { socket = ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/link"); }
   catch { scheduleReconnect(); return; }
-  ws.onopen = () => { backoff = 1000; ws.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keys.publicKey })); };
-  ws.onmessage = (ev) => {
+  socket.onopen = () => { if (attempt === connectionAttempt) socket.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keys.publicKey })); };
+  socket.onmessage = (ev) => {
+    if (attempt !== connectionAttempt) return;
     let m; try { m = JSON.parse(ev.data); } catch { return; }
-    if (m.type === "authed") { setConn(false, "等待电脑 Agent…"); if (m.peerOnline && m.peerPubkey) agentPub = m.peerPubkey; return; }
+    if (m.type === "authed") {
+      clearTimeout(connectionTimer); connectionTimer = null; backoff = 1000;
+      setConn(false, "等待电脑 Agent…");
+      if (m.peerOnline && m.peerPubkey) { agentPub = m.peerPubkey; armConnectionTimeout(attempt); }
+      return;
+    }
     if (m.type === "peer") {
       agentPub = m.online ? m.pubkey : null;
       if (!m.online) {
-        paired = false; appState.codexConnected = false; applyState();
+        clearTimeout(connectionTimer); connectionTimer = null;
+        paired = false; sessionReady = false; appState.codexConnected = false;
+        setConn(false, "等待电脑 Agent…");
         if (!$("pairing").classList.contains("hidden")) $("pStatus").textContent = "电脑端已离线，等待上线…";
-      }
+      } else armConnectionTimeout(attempt);
       return;
     }
     if (m.type === "e2e") {
       const inner = window.E2E.open(m, agentPub, keys.secretKey);
       if (!inner) return;
       if (inner.type === "needPairing") {
+        clearTimeout(connectionTimer); connectionTimer = null;
         // Agent online but this device isn't paired yet -> ask for the code (a step AFTER login).
         showPairing();
         $("pStatus").textContent = agentPub ? "✅ 电脑端在线，请输入配对码" : "等待电脑端上线…";
         return;
       }
       if (inner.type === "paired") {
-        if (inner.ok) { paired = true; showApp(); }      // bound -> straight to app
+        if (inner.ok) { paired = true; showApp(); armConnectionTimeout(attempt); }      // bound -> straight to app
         else { $("pMsg").textContent = "配对失败：" + (inner.reason || "配对码不对，请重试"); }
         return;
       }
@@ -274,30 +403,50 @@ async function connectCloud() {
       return;
     }
     if (m.type === "error") {
-      if (m.code === "membership_required") { membershipBlocked = true; try { ws.close(); } catch {} showMembership("云端会员未开通或已过期，输入兑换码即可开通。"); return; }
-      if (/token|invalid/i.test(m.message || "")) setConn(false, "登录失效");
+      if (m.code === "membership_required") { membershipBlocked = true; stopConnection(); showMembership("云端会员未开通或已过期，输入兑换码即可开通。"); return; }
+      if (/token|invalid/i.test(m.message || "")) loginFailed("登录失效，请重新登录");
       return;
     }
   };
-  ws.onclose = () => { setConn(false, "已断开"); if (!membershipBlocked) scheduleReconnect(); };
-  ws.onerror = () => { try { ws.close(); } catch {} };
+  socket.onclose = () => { if (attempt === connectionAttempt && !membershipBlocked) scheduleReconnect(); };
+  socket.onerror = () => { if (attempt === connectionAttempt) scheduleReconnect("网络连接失败，正在重试"); };
 }
 
-function scheduleReconnect() {
-  setTimeout(connect, backoff);
+function scheduleReconnect(label = "连接已断开，正在重试") {
+  if (!connectionWanted || membershipBlocked) return;
+  disposeConnection();
+  setConn(false, navigator.onLine ? label : "网络已离线");
+  if (!navigator.onLine) return;
+  reconnectTimer = setTimeout(connect, backoff);
   backoff = Math.min(backoff * 1.6, 15000);
 }
 
 function sendWs(obj) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  if (profile.mode === "cloud") {
-    if (!agentPub || !paired) return false;
-    ws.send(JSON.stringify({ type: "e2e", ...window.E2E.seal(obj, agentPub, keys.secretKey) }));
-  } else {
-    ws.send(JSON.stringify(obj));
-  }
-  return true;
+  if (!sessionReady || !ws || ws.readyState !== WebSocket.OPEN) return false;
+  try {
+    if (profile.mode === "cloud") {
+      if (!agentPub || !paired) return false;
+      ws.send(JSON.stringify({ type: "e2e", ...window.E2E.seal(obj, agentPub, keys.secretKey) }));
+    } else {
+      ws.send(JSON.stringify(obj));
+    }
+    return true;
+  } catch { scheduleReconnect(); return false; }
 }
+
+function resumeConnection() {
+  if (!connectionWanted || !profileReady(profile) || membershipBlocked) return;
+  backoff = 1000;
+  connect();
+}
+window.addEventListener("offline", () => {
+  if (!connectionWanted) return;
+  disposeConnection(); setConn(false, "网络已离线");
+});
+window.addEventListener("online", resumeConnection);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) resumeConnection(); });
+window.addEventListener("pageshow", (event) => { if (event.persisted) resumeConnection(); });
+$("reconnectBtn").onclick = resumeConnection;
 
 // ---------------------------------------------------------------------------
 // Inbound message handling
@@ -305,6 +454,12 @@ function sendWs(obj) {
 function handle(m) {
   switch (m.type) {
     case "hello":
+      clearTimeout(connectionTimer); connectionTimer = null;
+      backoff = 1000; sessionReady = true;
+      connectionLabel = "电脑 Codex 未连接";
+      followLatest = true;
+      if (deltaFrame) cancelAnimationFrame(deltaFrame);
+      deltaFrame = null;
       clearTimeout(writerTimer);
       writerPending = null; writerConflict = null;
       $("writerSheet").classList.add("hidden");
@@ -323,6 +478,7 @@ function handle(m) {
       }
       setDiff(m.diff || "");
       scrollFeed();
+      if (!lastProjectTree) loadSessions();
       break;
     case "state":
       appState = m.state || appState;
@@ -332,7 +488,10 @@ function handle(m) {
       clearTimeout(modelsTimer);
       modelCatalog = m.models || [];
       defaultModel = m.defaultModel || null;
+      defaultReasoningEffort = m.defaultReasoningEffort || null;
       renderModelOptions();
+      renderEffortOptions();
+      applyState();
       $("modelsStatus").textContent = m.error ? "模型列表加载不完整：" + m.error : (modelCatalog.length ? "" : "暂无可选模型");
       $("modelsRefresh").disabled = false;
       break;
@@ -353,7 +512,7 @@ function handle(m) {
       renderWriterConflict();
       break;
     case "event":
-      if (m.event.kind === "user" && input.value.trim() === m.event.text) input.value = "";
+      if (m.event.kind === "user" && input.value.trim() === m.event.text) { input.value = ""; input.style.height = "auto"; updateComposer(); }
       renderEvent(m.event);
       scrollFeed();
       break;
@@ -387,24 +546,36 @@ function handle(m) {
 }
 
 function setConn(ok, label) {
+  if (label) connectionLabel = label;
   $("connDot").classList.toggle("on", !!ok);
   if (label) $("statusPill").textContent = label;
+  $("statusPill").title = connectionLabel;
+  $("reconnectBtn").classList.toggle("hidden", !!ok);
+  updateComposer();
 }
 
 function applyState() {
-  const connected = !!(ws && ws.readyState === WebSocket.OPEN) && appState.codexConnected
+  const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN) && appState.codexConnected
     && (profile.mode !== "cloud" || (!!agentPub && paired));
   $("connDot").classList.toggle("on", connected);
   const running = appState.status === "running";
   const pill = $("statusPill");
-  pill.textContent = appState.readOnly ? "历史" : running ? "运行中" : "空闲";
+  pill.textContent = !connected ? connectionLabel : appState.readOnly ? "历史" : running ? "运行中" : "已连接";
+  pill.title = pill.textContent;
+  $("reconnectBtn").classList.toggle("hidden", !!connected);
   pill.className = "pill " + (running ? "running" : "idle");
   $("runningBar").classList.toggle("hidden", !running);
-  const name = appState.threadName ? "「" + appState.threadName + "」 " : "";
-  $("cwdLabel").textContent =
-    name + (appState.cwd || "—") +
-    ((appState.effectiveModel || appState.model) ? "  ·  " + (appState.effectiveModel || appState.model) : "") +
-    "  ·  " + (appState.approvalPolicy || "");
+  $("threadTitle").textContent = appState.threadName || "新对话";
+  $("threadTitle").title = appState.threadName || "新对话";
+  $("cwdLabel").textContent = appState.cwd || "";
+  $("cwdLabel").title = appState.cwd || "";
+  const activeModel = appState.model || defaultModel || appState.effectiveModel;
+  $("headerModel").textContent = modelCatalog.find((m) => m.model === activeModel)?.displayName || activeModel || "默认模型";
+  $("headerModel").title = activeModel || "Codex 默认";
+  $("effortLabel").textContent = effortName(appState.reasoningEffort);
+  $("effortBtn").title = "思考等级：" + effortName(appState.reasoningEffort) + (appState.effectiveReasoningEffort ? "；当前任务：" + effortName(appState.effectiveReasoningEffort) : "");
+  document.querySelectorAll(".session-item").forEach((item) => item.classList.toggle("active", item.dataset.threadId === appState.threadId));
+  updateComposer();
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +600,14 @@ function labelFor(kind) {
 
 function setEventText(div, e) {
   const body = div.querySelector(".body");
-  if (body) body.textContent = e.text || "";
+  div.dataset.text = e.text || "";
+  if (body) {
+    if (div.classList.contains("assistant")) {
+      body.classList.add("markdown");
+      body.innerHTML = window.ChatUI.markdown(e.text || "");
+      body.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+    } else body.textContent = e.text || "";
+  }
   const summary = div.querySelector("summary");
   if (summary) { summary.textContent = (e.text || "").split("\n")[0]; summary.title = summary.textContent; }
 }
@@ -442,7 +620,7 @@ function renderEvent(e) {
     return;
   }
   if (e.kind === "item:agentMessage" && liveAssistant && (!e.itemId || liveAssistant.dataset.itemId === e.itemId)) {
-    liveAssistant.querySelector(".body").textContent = e.text;
+    setEventText(liveAssistant, e);
     liveAssistant.dataset.eventId = e.id || "";
     if (e.id) eventRows.set(e.id, liveAssistant);
     liveAssistant = null;
@@ -457,6 +635,8 @@ function renderEvent(e) {
   div.innerHTML = (lab ? '<div class="label">' + lab + '</div>' : "") + (collapsible ? '<details><summary></summary><div class="body"></div></details>' : '<div class="body"></div>');
   setEventText(div, e);
   $("feed").appendChild(div);
+  if (cls(e.kind) === "assistant") addMessageActions(div);
+  $("emptyState").classList.add("hidden");
   if (e.id) eventRows.set(e.id, div);
   if (e.live) liveAssistant = div;
 }
@@ -470,15 +650,42 @@ function appendAssistant(text, itemId) {
     div.innerHTML = `<div class="label">Codex</div><div class="body"></div>`;
     $("feed").appendChild(div);
     liveAssistant = div;
+    addMessageActions(div);
+    $("emptyState").classList.add("hidden");
   }
-  liveAssistant.querySelector(".body").textContent += text;
-  scrollFeed();
+  liveAssistant.dataset.text = (liveAssistant.dataset.text || "") + text;
+  if (!deltaFrame) deltaFrame = requestAnimationFrame(() => {
+    deltaFrame = null;
+    if (liveAssistant) setEventText(liveAssistant, { text: liveAssistant.dataset.text });
+    scrollFeed();
+  });
 }
 
-function scrollFeed() {
+function scrollFeed(force = false) {
   const f = $("feed");
-  f.scrollTop = f.scrollHeight;
+  if (followLatest || force) { f.scrollTop = f.scrollHeight; followLatest = true; }
+  $("scrollBottom").classList.toggle("hidden", followLatest);
+  $("emptyState").classList.toggle("hidden", f.childElementCount > 0);
 }
+
+function addMessageActions(div) {
+  const actions = document.createElement("div"); actions.className = "message-actions";
+  const copy = document.createElement("button"); copy.className = "icon-btn"; copy.title = "复制回复"; copy.setAttribute("aria-label", "复制回复");
+  copy.innerHTML = '<i data-lucide="copy"></i>';
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(div.dataset.text || "");
+      copy.innerHTML = '<i data-lucide="check"></i>'; window.ChatUI.icons(copy); copy.title = "已复制";
+      setTimeout(() => { copy.innerHTML = '<i data-lucide="copy"></i>'; window.ChatUI.icons(copy); copy.title = "复制回复"; }, 1800);
+    } catch { copy.title = "复制失败，请选择文字复制"; }
+  };
+  actions.append(copy); div.append(actions); window.ChatUI.icons(actions);
+}
+$("feed").addEventListener("scroll", () => {
+  const f = $("feed"); followLatest = f.scrollHeight - f.scrollTop - f.clientHeight < 80;
+  $("scrollBottom").classList.toggle("hidden", followLatest);
+}, { passive: true });
+$("scrollBottom").onclick = () => scrollFeed(true);
 
 // ---------------------------------------------------------------------------
 // Approvals
@@ -489,11 +696,11 @@ function renderApproval(a) {
   card.className = "approval-card";
   card.dataset.key = a.key;
   const meta = [];
-  if (a.cwd) meta.push("📁 " + a.cwd);
-  if (a.reason) meta.push("💬 " + a.reason);
-  if (a.note) meta.push("⚠ " + a.note);
+  if (a.cwd) meta.push(a.cwd);
+  if (a.reason) meta.push(a.reason);
+  if (a.note) meta.push(a.note);
   card.innerHTML =
-    `<div class="ac-title">⚠ ${a.title}</div>` +
+    `<div class="ac-title">${escapeHtml(a.title)}</div>` +
     `<div class="ac-cmd">${escapeHtml(a.command || "")}</div>` +
     (meta.length ? `<div class="ac-meta">${escapeHtml(meta.join("\n"))}</div>` : "") +
     `<div class="ac-actions"></div>`;
@@ -542,18 +749,27 @@ $("enableNotif").onclick = async () => {
 // Composer: send / steer / interrupt
 // ---------------------------------------------------------------------------
 const input = $("input");
+function updateComposer() {
+  const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN && appState.codexConnected) && (profile.mode !== "cloud" || (!!agentPub && paired));
+  const blocked = appState.status === "running" && !$("steerMode").checked;
+  $("sendBtn").disabled = !connected || !$("input").value.trim() || blocked;
+  $("quickNewThread").disabled = $("sidebarNewThread").disabled = appState.status === "running" || !connected;
+}
 input.addEventListener("input", () => {
   input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 120) + "px";
+  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  updateComposer();
 });
 
 function sendPrompt() {
   const text = input.value.trim();
   if (!text) return;
+  if ($("sendBtn").disabled) return;
   const steer = $("steerMode").checked;
   if (!sendWs(steer ? { type: "steer", text } : { type: "prompt", text })) return;
   if (!appState.readOnly) input.value = "";
   input.style.height = "auto";
+  updateComposer();
 }
 
 $("sendBtn").onclick = sendPrompt;
@@ -565,11 +781,13 @@ input.addEventListener("keydown", (e) => {
   }
 });
 $("interruptBtn").onclick = () => sendWs({ type: "interrupt" });
+$("steerMode").onchange = () => { input.placeholder = $("steerMode").checked ? "补充当前任务" : "发送消息"; updateComposer(); };
 
 // ---------------------------------------------------------------------------
 // Settings sheet
 // ---------------------------------------------------------------------------
 function renderModelOptions(selected = $("cfgModel").value) {
+  if (selected === "custom" && modelCatalog.some((m) => m.model === $("cfgCustomModel").value.trim())) selected = "model:" + $("cfgCustomModel").value.trim();
   const select = $("cfgModel");
   select.replaceChildren(new Option(defaultModel ? "Codex 默认（" + defaultModel + "）" : "Codex 默认", "default"));
   modelCatalog.forEach((m) => select.add(new Option(m.displayName === m.model ? m.model : m.displayName + " · " + m.model, "model:" + m.model)));
@@ -595,6 +813,27 @@ function requestModels() {
     $("modelsRefresh").disabled = false;
   }, 20000);
 }
+function selectedModelId() {
+  const selected = $("cfgModel").value;
+  return selected === "default" ? defaultModel : selected === "custom" ? $("cfgCustomModel").value.trim() : selected.slice(6);
+}
+function selectedEffort() { return $("cfgEffort").value === "custom" ? $("cfgCustomEffort").value.trim() : $("cfgEffort").value || null; }
+function renderEffortOptions(selected = selectedEffort()) {
+  const entry = modelCatalog.find((m) => m.model === selectedModelId());
+  const known = Array.isArray(entry?.supportedReasoningEfforts);
+  const levels = known ? entry.supportedReasoningEfforts.map((o) => o.reasoningEffort)
+    : [...new Set([...Object.keys(effortNames), ...modelCatalog.flatMap((m) => (m.supportedReasoningEfforts || []).map((o) => o.reasoningEffort))])];
+  const base = ($("cfgModel").value === "default" ? defaultReasoningEffort : null) || entry?.defaultReasoningEffort;
+  const select = $("cfgEffort");
+  select.replaceChildren(new Option(base ? "Codex 默认（" + effortName(base) + "）" : "Codex 默认", ""));
+  levels.forEach((level) => select.add(new Option(effortName(level), level)));
+  if (!known) select.add(new Option("自定义等级", "custom"));
+  if (selected && !levels.includes(selected)) {
+    if (!known) { $("cfgCustomEffort").value = selected; select.value = "custom"; }
+    else select.value = "";
+  } else select.value = selected || "";
+  $("customEffortRow").classList.toggle("hidden", select.value !== "custom");
+}
 function updateSettingsButtons() {
   $("cfgApply").disabled = !!pendingConfig;
   $("newThreadBtn").disabled = !!pendingConfig;
@@ -606,27 +845,38 @@ function configError(message) {
   $("cfgError").classList.remove("hidden");
   updateSettingsButtons();
 }
-$("menuBtn").onclick = () => {
+function openSettings(focus = "cfgModel") {
   $("cfgCwd").value = appState.cwd || "";
   $("cfgApproval").value = appState.approvalPolicy || "on-request";
   $("cfgSandbox").value = appState.sandbox || "workspace-write";
   $("cfgCustomModel").value = appState.model || "";
   renderModelOptions(appState.model ? "model:" + appState.model : "default");
+  renderEffortOptions(appState.reasoningEffort || null);
   $("cfgError").classList.add("hidden");
   $("sheet").classList.remove("hidden");
+  $(focus).focus();
   requestModels();
-};
+}
+$("menuBtn").onclick = () => openSettings();
+$("modelBtn").onclick = () => openSettings("cfgModel");
+$("effortBtn").onclick = () => openSettings("cfgEffort");
+$("sidebarSettings").onclick = () => { $("sessionsSheet").classList.add("hidden"); openSettings(); };
 $("cfgModel").onchange = () => {
   $("customModelRow").classList.toggle("hidden", $("cfgModel").value !== "custom");
   $("cfgError").classList.add("hidden");
+  renderEffortOptions();
 };
-$("cfgCustomModel").oninput = () => $("cfgError").classList.add("hidden");
+$("cfgCustomModel").oninput = () => { $("cfgError").classList.add("hidden"); renderEffortOptions(); };
+$("cfgEffort").onchange = () => { $("customEffortRow").classList.toggle("hidden", $("cfgEffort").value !== "custom"); $("cfgError").classList.add("hidden"); };
+$("cfgTheme").onchange = () => { localStorage.setItem("codexapp.theme", $("cfgTheme").value); applyTheme(); };
 $("modelsRefresh").onclick = requestModels;
 $("sheetClose").onclick = () => $("sheet").classList.add("hidden");
 function saveSettings(newThread = false) {
   if (pendingConfig) return;
   const selected = $("cfgModel").value;
   const model = selected === "default" ? null : selected === "custom" ? $("cfgCustomModel").value.trim() : selected.slice(6);
+  const reasoningEffort = selectedEffort();
+  if (reasoningEffort && !/^[a-z][a-z0-9_-]{0,63}$/.test(reasoningEffort)) { configError("请输入有效的思考等级"); return; }
   if (selected === "custom" && (!model || /\s|[\x00-\x1f\x7f]/.test(model))) {
     configError("请输入有效的模型 ID");
     return;
@@ -638,6 +888,7 @@ function saveSettings(newThread = false) {
     type: "setConfig",
     requestId: pendingConfig.requestId,
     model,
+    reasoningEffort,
     cwd: $("cfgCwd").value.trim() || undefined,
     approvalPolicy: $("cfgApproval").value,
     sandbox: $("cfgSandbox").value,
@@ -646,6 +897,11 @@ function saveSettings(newThread = false) {
 }
 $("cfgApply").onclick = () => saveSettings();
 $("newThreadBtn").onclick = () => saveSettings(true);
+function quickNewThread() {
+  if (appState.status === "running") return;
+  if (sendWs({ type: "newThread" })) $("sessionsSheet").classList.add("hidden");
+}
+$("quickNewThread").onclick = $("sidebarNewThread").onclick = quickNewThread;
 function forget() {
   localStorage.removeItem(LS.profile); // keep keys so the device stays paired
   location.reload();
@@ -685,29 +941,34 @@ $("sessionsClose").onclick = () => $("sessionsSheet").classList.add("hidden");
 function sessionItem(t) {
   const item = document.createElement("button");
   item.className = "session-item nested";
-  const when = t.updatedAt ? new Date(t.updatedAt * 1000).toLocaleString() : "";
+  item.dataset.threadId = t.id;
+  item.classList.toggle("active", t.id === appState.threadId);
+  item.title = t.name || "无标题";
+  const when = t.updatedAt ? new Date(t.updatedAt * 1000).toLocaleDateString("zh-CN", { month: "long", day: "numeric" }) : "";
   item.innerHTML =
     `<div class="s-name">${escapeHtml(t.name || "(无标题)")}</div>` +
     `<div class="s-meta">${escapeHtml(when)}</div>`;
   item.onclick = () => {
-    sendWs({ type: "readThread", threadId: t.id });
-    $("sessionsSheet").classList.add("hidden");
+    if (sendWs({ type: "readThread", threadId: t.id })) $("sessionsSheet").classList.add("hidden");
   };
   return item;
 }
 
 function renderProjectTree(tree) {
+  lastProjectTree = tree;
+  const query = $("sessionSearch").value.trim().toLowerCase();
   const list = $("sessionsList");
   list.innerHTML = "";
-  const projects = tree.projects || [];
-  const projectless = tree.projectless || [];
-  if (!projects.length && !projectless.length) { list.innerHTML = '<p class="muted small">没有会话</p>'; return; }
+  const matches = (t) => !query || (t.name || "").toLowerCase().includes(query);
+  const projects = (tree.projects || []).map((p) => ({ ...p, threads: p.label.toLowerCase().includes(query) ? p.threads : p.threads.filter(matches) })).filter((p) => !query || p.threads.length);
+  const projectless = (tree.projectless || []).filter(matches);
+  if (!projects.length && !projectless.length) { list.innerHTML = '<p class="muted small">' + (query ? "没有匹配的对话" : "没有会话") + '</p>'; return; }
 
   projects.forEach((p) => {
     const header = document.createElement("div");
     header.className = "session-group";
     header.innerHTML =
-      `<div class="sg-name">📁 ${escapeHtml(p.label)} <span class="sg-count">${p.threads.length}</span></div>` +
+      `<div class="sg-name"><i data-lucide="folder"></i>${escapeHtml(p.label)} <span class="sg-count">${p.threads.length}</span></div>` +
       `<div class="sg-path mono">${escapeHtml(p.root)}</div>`;
     list.appendChild(header);
     if (!p.threads.length) {
@@ -722,11 +983,13 @@ function renderProjectTree(tree) {
   if (projectless.length) {
     const header = document.createElement("div");
     header.className = "session-group";
-    header.innerHTML = `<div class="sg-name">💬 对话 <span class="sg-count">${projectless.length}</span></div>`;
+    header.innerHTML = `<div class="sg-name"><i data-lucide="message-square"></i>对话 <span class="sg-count">${projectless.length}</span></div>`;
     list.appendChild(header);
     projectless.forEach((t) => list.appendChild(sessionItem(t)));
   }
+  window.ChatUI.icons(list);
 }
+$("sessionSearch").oninput = () => { if (lastProjectTree) renderProjectTree(lastProjectTree); };
 
 function updateWriterButtons() {
   $("writerSheet").querySelectorAll("button").forEach((button) => { button.disabled = !!writerPending; });
@@ -795,4 +1058,19 @@ $("writerClose").onclick = () => $("writerSheet").classList.add("hidden");
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
-start();
+document.querySelectorAll(".sheet").forEach((sheet) => sheet.addEventListener("click", (e) => { if (e.target === sheet && !writerPending) sheet.classList.add("hidden"); }));
+document.addEventListener("keydown", (e) => {
+  const sheets = [...document.querySelectorAll(".sheet:not(.hidden)")];
+  const sheet = sheets.at(-1);
+  if (!sheet) return;
+  if (e.key === "Escape" && !writerPending) { sheet.classList.add("hidden"); $("menuBtn").focus(); }
+  if (e.key === "Tab") {
+    const controls = [...sheet.querySelectorAll("button:not(:disabled), input, select, textarea, [tabindex='0']")].filter((el) => el.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+  }
+});
+function syncViewport() { document.documentElement.style.setProperty("--app-height", (window.visualViewport?.height || window.innerHeight) + "px"); }
+window.visualViewport?.addEventListener("resize", syncViewport);
+syncViewport(); applyTheme(); window.ChatUI.icons(); updateComposer(); start();

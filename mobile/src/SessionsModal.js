@@ -1,63 +1,46 @@
-import { Modal, View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
+import { useState } from "react";
+import { Modal, View, Text, TextInput, Pressable, ScrollView, StyleSheet, SafeAreaView } from "react-native";
+import Feather from "@expo/vector-icons/Feather";
 import { C } from "./theme";
 
-// Renders the SAME project tree Codex desktop shows (projects + labels + order
-// + empty "暂无对话" + flat 对话). Data comes from the relay (reads Codex's
-// own .codex-global-state.json).
-export default function SessionsModal({ visible, tree, onResume, onRefresh, onClose }) {
-  const projects = (tree && tree.projects) || [];
-  const projectless = (tree && tree.projectless) || [];
-
-  const item = (t) => (
-    <Pressable key={t.id} style={s.item} onPress={() => onResume(t.id)}>
-      <Text style={s.name} numberOfLines={1}>{t.name || "(无标题)"}</Text>
-      <Text style={s.meta}>{t.updatedAt ? new Date(t.updatedAt * 1000).toLocaleString() : ""}</Text>
-    </Pressable>
-  );
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={s.backdrop}>
-        <View style={s.sheet}>
-          <Text style={s.h2}>会话 / 项目</Text>
-          <ScrollView style={{ maxHeight: "70%" }}>
-            {projects.length === 0 && projectless.length === 0 && <Text style={s.hint}>没有会话</Text>}
-            {projects.map((p) => (
-              <View key={p.id || p.root}>
-                <Text style={s.groupName} numberOfLines={1}>📁 {p.label}  ({p.threads.length})</Text>
-                <Text style={s.groupPath} numberOfLines={1}>{p.root}</Text>
-                {p.threads.length === 0 && <Text style={s.empty}>暂无对话</Text>}
-                {p.threads.map(item)}
-              </View>
-            ))}
-            {projectless.length > 0 && (
-              <View>
-                <Text style={s.groupName}>💬 对话  ({projectless.length})</Text>
-                {projectless.map(item)}
-              </View>
-            )}
-          </ScrollView>
-          <Pressable style={[s.btn, s.secondary]} onPress={onRefresh}><Text style={s.btnText}>刷新</Text></Pressable>
-          <Pressable style={[s.btn, s.ghost]} onPress={onClose}><Text style={[s.btnText, { color: C.muted }]}>关闭</Text></Pressable>
-        </View>
-      </View>
-    </Modal>
-  );
+export default function SessionsModal({ visible, tree, activeThreadId, onResume, onRefresh, onNewThread, onSettings, onClose }) {
+  const [query, setQuery] = useState("");
+  const search = query.trim().toLowerCase();
+  const matches = (t) => !search || (t.name || "").toLowerCase().includes(search);
+  const projects = (tree?.projects || []).map((p) => ({ ...p, threads: p.label.toLowerCase().includes(search) ? p.threads : p.threads.filter(matches) })).filter((p) => !search || p.threads.length);
+  const projectless = (tree?.projectless || []).filter(matches);
+  const item = (t) => <Pressable accessibilityRole="button" key={t.id} style={[s.item, t.id === activeThreadId && { backgroundColor: C.card2 }]} onPress={() => onResume(t.id)}><Text style={s.name} numberOfLines={1}>{t.name || "无标题"}</Text><Text style={s.meta}>{t.updatedAt ? new Date(t.updatedAt * 1000).toLocaleDateString("zh-CN", { month: "long", day: "numeric" }) : ""}</Text></Pressable>;
+  return <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+    <View style={s.backdrop}>
+      <SafeAreaView style={s.sheet}>
+        <View style={s.header}><Text style={s.title}>CodexApp</Text><Pressable style={s.icon} accessibilityLabel="刷新会话列表" onPress={onRefresh}><Feather name="refresh-cw" size={20} color={C.text} /></Pressable><Pressable style={s.icon} accessibilityLabel="关闭会话列表" onPress={onClose}><Feather name="x" size={22} color={C.text} /></Pressable></View>
+        <Pressable style={s.command} onPress={onNewThread}><Feather name="edit" size={20} color={C.text} /><Text style={s.name}>新对话</Text></Pressable>
+        <View style={s.search}><Feather name="search" size={17} color={C.muted} /><TextInput style={s.input} accessibilityLabel="搜索对话" value={query} onChangeText={setQuery} placeholder="搜索对话" placeholderTextColor={C.muted} /></View>
+        <ScrollView style={s.list}>
+          {!projects.length && !projectless.length && <Text style={s.hint}>{search ? "没有匹配的对话" : "没有会话"}</Text>}
+          {projects.map((p) => <View key={p.id || p.root}><View style={s.group}><Feather name="folder" size={14} color={C.muted} /><Text style={s.groupName} numberOfLines={1}>{p.label}  {p.threads.length}</Text></View>{!p.threads.length && <Text style={s.hint}>暂无对话</Text>}{p.threads.map(item)}</View>)}
+          {!!projectless.length && <View><View style={s.group}><Feather name="message-square" size={14} color={C.muted} /><Text style={s.groupName}>对话  {projectless.length}</Text></View>{projectless.map(item)}</View>}
+        </ScrollView>
+        <Pressable style={s.command} onPress={onSettings}><Feather name="sliders" size={20} color={C.text} /><Text style={s.name}>设置</Text></Pressable>
+      </SafeAreaView>
+      <Pressable accessibilityLabel="关闭会话列表" style={{ flex: 1 }} onPress={onClose} />
+    </View>
+  </Modal>;
 }
-
 const s = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  sheet: { backgroundColor: C.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 18, maxHeight: "88%" },
-  h2: { color: C.text, fontSize: 20, fontWeight: "800", marginBottom: 4 },
-  hint: { color: C.muted, fontSize: 13, marginBottom: 8 },
-  item: { backgroundColor: C.bg2, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, marginBottom: 8, marginLeft: 12 },
-  name: { color: C.text, fontWeight: "600", marginBottom: 4 },
-  meta: { color: C.muted, fontSize: 12 },
-  groupName: { color: C.accent2, fontWeight: "700", fontSize: 14, marginTop: 10 },
-  groupPath: { color: C.muted, fontSize: 11, marginBottom: 6 },
-  empty: { color: C.muted, fontSize: 12, marginLeft: 12, marginBottom: 8 },
-  btn: { borderRadius: 10, paddingVertical: 13, alignItems: "center", borderWidth: 1, borderColor: C.line, marginTop: 8 },
-  secondary: { backgroundColor: C.card2 },
-  ghost: { backgroundColor: "transparent" },
-  btnText: { color: C.text, fontWeight: "700", fontSize: 15 },
+  backdrop: { flex: 1, flexDirection: "row", backgroundColor: "rgba(0,0,0,0.5)" },
+  sheet: { width: "86%", maxWidth: 320, backgroundColor: C.bg2, paddingHorizontal: 12 },
+  header: { flexDirection: "row", alignItems: "center", paddingVertical: 12 },
+  title: { color: C.text, fontSize: 18, fontWeight: "600", marginRight: "auto" },
+  icon: { width: 36, height: 40, alignItems: "center", justifyContent: "center" },
+  command: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12 },
+  search: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12 },
+  input: { flex: 1, color: C.text, fontSize: 14, paddingVertical: 12 },
+  list: { flex: 1, marginTop: 16 },
+  group: { flexDirection: "row", alignItems: "center", gap: 7, padding: 12, paddingTop: 20 },
+  groupName: { color: C.muted, fontSize: 12, flexShrink: 1 },
+  item: { padding: 12, borderRadius: 6 },
+  name: { color: C.text, fontSize: 14 },
+  meta: { color: C.muted, fontSize: 10, marginTop: 3 },
+  hint: { color: C.muted, fontSize: 12, padding: 12 },
 });

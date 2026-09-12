@@ -56,7 +56,7 @@ export default function SetupScreen({ initial, onConnect }) {
               <Text style={[s.tabText, mode === "cloud" && s.tabTextOn]}>云账号（随处可用）</Text>
             </Pressable>
             <Pressable style={[s.tab, mode === "lan" && s.tabOn]} onPress={() => { setMode("lan"); setMsg(""); }}>
-              <Text style={[s.tabText, mode === "lan" && s.tabTextOn]}>局域网直连</Text>
+              <Text style={[s.tabText, mode === "lan" && s.tabTextOn]}>中继直连</Text>
             </Pressable>
           </View>
 
