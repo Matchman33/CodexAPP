@@ -140,6 +140,19 @@
       <h2>设置</h2>
       <label>工作目录 (cwd)</label>
       <input id="cfgCwd" type="text" class="mono" autocapitalize="off" autocorrect="off" />
+      <label for="cfgModel">模型</label>
+      <div class="model-row">
+        <select id="cfgModel" aria-label="模型">
+          <option value="default">Codex 默认</option>
+          <option value="custom">自定义模型</option>
+        </select>
+        <button id="modelsRefresh" class="icon-btn" title="刷新模型列表" aria-label="刷新模型列表">&#8635;</button>
+      </div>
+      <div id="customModelRow" class="hidden">
+        <label for="cfgCustomModel">模型 ID</label>
+        <input id="cfgCustomModel" class="mono" type="text" maxlength="200" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      </div>
+      <p id="modelsStatus" class="muted small" role="status" aria-live="polite"></p>
       <label>审批策略</label>
       <select id="cfgApproval">
         <option value="on-request">on-request（按需，推荐）</option>
@@ -154,9 +167,10 @@
         <option value="danger-full-access">danger-full-access</option>
       </select>
       <div class="sheet-actions">
-        <button id="cfgApply" class="btn primary">应用 (下个会话生效)</button>
+        <button id="cfgApply" class="btn primary">应用</button>
         <button id="newThreadBtn" class="btn secondary">新建会话</button>
       </div>
+      <p id="cfgError" class="small settings-error hidden" role="alert"></p>
       <button id="enableNotif" class="btn secondary full">开启审批通知</button>
       <p id="memberStatus" class="muted small"></p>
       <button id="redeemBtn" class="btn secondary full hidden">兑换 / 续费会员</button>
@@ -169,10 +183,30 @@
   <div id="sessionsSheet" class="sheet hidden">
     <div class="sheet-card">
       <h2>会话 / 项目</h2>
-      <p class="muted small">点一条接着写——会切到它的项目目录，继续这段对话。</p>
       <div id="sessionsList" class="sessions-list"></div>
       <button id="sessionsRefresh" class="btn secondary full">刷新</button>
       <button id="sessionsClose" class="btn ghost full">关闭</button>
+    </div>
+  </div>
+
+  <div id="writerSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="writerTitle">
+    <div class="sheet-card">
+      <h2 id="writerTitle">会话被占用</h2>
+      <p id="writerMessage" class="small"></p>
+      <div id="writerOwners"></div>
+      <div id="writerConfirm" class="hidden">
+        <p id="writerConfirmText" class="settings-error small"></p>
+        <div class="sheet-actions">
+          <button id="writerConfirmBtn" class="btn danger">确认结束进程</button>
+          <button id="writerCancelBtn" class="btn secondary">取消</button>
+        </div>
+      </div>
+      <p id="writerStatus" class="small muted" role="status" aria-live="polite"></p>
+      <div class="sheet-actions">
+        <button id="writerRetry" class="btn secondary">重试接续</button>
+        <button id="writerInspect" class="btn secondary">重新检查占用</button>
+      </div>
+      <button id="writerClose" class="btn ghost full">关闭</button>
     </div>
   </div>
 

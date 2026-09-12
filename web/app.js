@@ -9,7 +9,17 @@ const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
 let ws = null;
 let backoff = 1000;
 let liveAssistant = null;   // the streaming assistant bubble (or null)
+const eventRows = new Map();
 let appState = {};
+let modelCatalog = [];
+let defaultModel = null;
+let modelsTimer = null;
+let configTimer = null;
+let pendingConfig = null;
+let writerConflict = null;
+let writerChoice = null;
+let writerPending = null;
+let writerTimer = null;
 let lastDiff = "";          // latest unified diff for the current turn
 let profile = loadProfile();
 let keys = loadKeys();      // E2E keypair (cloud mode)
@@ -279,13 +289,14 @@ function scheduleReconnect() {
 }
 
 function sendWs(obj) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   if (profile.mode === "cloud") {
-    if (!agentPub) return;
+    if (!agentPub || !paired) return false;
     ws.send(JSON.stringify({ type: "e2e", ...window.E2E.seal(obj, agentPub, keys.secretKey) }));
   } else {
     ws.send(JSON.stringify(obj));
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,9 +305,14 @@ function sendWs(obj) {
 function handle(m) {
   switch (m.type) {
     case "hello":
+      clearTimeout(writerTimer);
+      writerPending = null; writerConflict = null;
+      $("writerSheet").classList.add("hidden");
       appState = m.state || {};
       applyState();
       $("feed").innerHTML = "";
+      eventRows.clear();
+      liveAssistant = null;
       (m.recentEvents || []).forEach(renderEvent);
       $("approvals").innerHTML = "";
       (m.pendingApprovals || []).forEach(renderApproval);
@@ -312,12 +328,37 @@ function handle(m) {
       appState = m.state || appState;
       applyState();
       break;
+    case "models":
+      clearTimeout(modelsTimer);
+      modelCatalog = m.models || [];
+      defaultModel = m.defaultModel || null;
+      renderModelOptions();
+      $("modelsStatus").textContent = m.error ? "模型列表加载不完整：" + m.error : (modelCatalog.length ? "" : "暂无可选模型");
+      $("modelsRefresh").disabled = false;
+      break;
+    case "configSaved":
+      if (pendingConfig && pendingConfig.requestId === m.requestId) {
+        const create = pendingConfig.newThread;
+        clearTimeout(configTimer);
+        pendingConfig = null;
+        if (create) sendWs({ type: "newThread", cwd: $("cfgCwd").value.trim() || undefined });
+        $("sheet").classList.add("hidden");
+        updateSettingsButtons();
+      }
+      break;
+    case "writerConflict":
+      clearTimeout(writerTimer);
+      writerPending = null;
+      writerConflict = m;
+      renderWriterConflict();
+      break;
     case "event":
+      if (m.event.kind === "user" && input.value.trim() === m.event.text) input.value = "";
       renderEvent(m.event);
       scrollFeed();
       break;
     case "assistantDelta":
-      appendAssistant(m.text);
+      appendAssistant(m.text, m.itemId);
       break;
     case "approval":
       renderApproval(m.approval);
@@ -327,6 +368,12 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (writerPending && writerPending === m.requestId) {
+        clearTimeout(writerTimer); writerPending = null;
+        $("writerStatus").textContent = m.message;
+        updateWriterButtons();
+      }
+      if (pendingConfig && pendingConfig.requestId === m.requestId) configError(m.message);
       renderEvent({ kind: "error", text: m.message, ts: Date.now() });
       scrollFeed();
       break;
@@ -350,13 +397,13 @@ function applyState() {
   $("connDot").classList.toggle("on", connected);
   const running = appState.status === "running";
   const pill = $("statusPill");
-  pill.textContent = running ? "运行中" : "空闲";
+  pill.textContent = appState.readOnly ? "历史" : running ? "运行中" : "空闲";
   pill.className = "pill " + (running ? "running" : "idle");
   $("runningBar").classList.toggle("hidden", !running);
   const name = appState.threadName ? "「" + appState.threadName + "」 " : "";
   $("cwdLabel").textContent =
     name + (appState.cwd || "—") +
-    (appState.model ? "  ·  " + appState.model : "") +
+    ((appState.effectiveModel || appState.model) ? "  ·  " + (appState.effectiveModel || appState.model) : "") +
     "  ·  " + (appState.approvalPolicy || "");
 }
 
@@ -380,25 +427,46 @@ function labelFor(kind) {
   return null;
 }
 
+function setEventText(div, e) {
+  const body = div.querySelector(".body");
+  if (body) body.textContent = e.text || "";
+  const summary = div.querySelector("summary");
+  if (summary) { summary.textContent = (e.text || "").split("\n")[0]; summary.title = summary.textContent; }
+}
+
 function renderEvent(e) {
-  // Finalize a streaming assistant bubble when the full message lands.
-  if (e.kind === "item:agentMessage" && liveAssistant) {
+  const existing = e.id && eventRows.get(e.id);
+  if (existing) {
+    setEventText(existing, e);
+    if (existing === liveAssistant && !e.live) liveAssistant = null;
+    return;
+  }
+  if (e.kind === "item:agentMessage" && liveAssistant && (!e.itemId || liveAssistant.dataset.itemId === e.itemId)) {
     liveAssistant.querySelector(".body").textContent = e.text;
+    liveAssistant.dataset.eventId = e.id || "";
+    if (e.id) eventRows.set(e.id, liveAssistant);
     liveAssistant = null;
     return;
   }
   const div = document.createElement("div");
   div.className = "entry " + cls(e.kind);
+  div.dataset.eventId = e.id || "";
+  div.dataset.itemId = e.itemId || "";
   const lab = labelFor(e.kind);
-  div.innerHTML = (lab ? `<div class="label">${lab}</div>` : "") + `<div class="body"></div>`;
-  div.querySelector(".body").textContent = e.text || "";
+  const collapsible = e.kind?.startsWith("item:") && !["item:agentMessage", "item:plan"].includes(e.kind) && (e.text || "").includes("\n");
+  div.innerHTML = (lab ? '<div class="label">' + lab + '</div>' : "") + (collapsible ? '<details><summary></summary><div class="body"></div></details>' : '<div class="body"></div>');
+  setEventText(div, e);
   $("feed").appendChild(div);
+  if (e.id) eventRows.set(e.id, div);
+  if (e.live) liveAssistant = div;
 }
 
-function appendAssistant(text) {
+function appendAssistant(text, itemId) {
+  if (liveAssistant && itemId && liveAssistant.dataset.itemId !== itemId) liveAssistant = null;
   if (!liveAssistant) {
     const div = document.createElement("div");
     div.className = "entry assistant";
+    div.dataset.itemId = itemId || "";
     div.innerHTML = `<div class="label">Codex</div><div class="body"></div>`;
     $("feed").appendChild(div);
     liveAssistant = div;
@@ -483,8 +551,8 @@ function sendPrompt() {
   const text = input.value.trim();
   if (!text) return;
   const steer = $("steerMode").checked;
-  sendWs(steer ? { type: "steer", text } : { type: "prompt", text });
-  input.value = "";
+  if (!sendWs(steer ? { type: "steer", text } : { type: "prompt", text })) return;
+  if (!appState.readOnly) input.value = "";
   input.style.height = "auto";
 }
 
@@ -501,21 +569,83 @@ $("interruptBtn").onclick = () => sendWs({ type: "interrupt" });
 // ---------------------------------------------------------------------------
 // Settings sheet
 // ---------------------------------------------------------------------------
-$("menuBtn").onclick = () => $("sheet").classList.remove("hidden");
+function renderModelOptions(selected = $("cfgModel").value) {
+  const select = $("cfgModel");
+  select.replaceChildren(new Option(defaultModel ? "Codex 默认（" + defaultModel + "）" : "Codex 默认", "default"));
+  modelCatalog.forEach((m) => select.add(new Option(m.displayName === m.model ? m.model : m.displayName + " · " + m.model, "model:" + m.model)));
+  select.add(new Option("自定义模型", "custom"));
+  if (selected.startsWith("model:") && !modelCatalog.some((m) => "model:" + m.model === selected)) {
+    $("cfgCustomModel").value = selected.slice(6);
+    selected = "custom";
+  }
+  select.value = selected || "default";
+  $("customModelRow").classList.toggle("hidden", select.value !== "custom");
+}
+function requestModels() {
+  clearTimeout(modelsTimer);
+  $("modelsStatus").textContent = "加载中…";
+  $("modelsRefresh").disabled = true;
+  if (!sendWs({ type: "listModels", cwd: $("cfgCwd").value.trim() || undefined })) {
+    $("modelsStatus").textContent = "连接已断开";
+    $("modelsRefresh").disabled = false;
+    return;
+  }
+  modelsTimer = setTimeout(() => {
+    $("modelsStatus").textContent = "模型列表加载超时";
+    $("modelsRefresh").disabled = false;
+  }, 20000);
+}
+function updateSettingsButtons() {
+  $("cfgApply").disabled = !!pendingConfig;
+  $("newThreadBtn").disabled = !!pendingConfig;
+}
+function configError(message) {
+  clearTimeout(configTimer);
+  pendingConfig = null;
+  $("cfgError").textContent = message;
+  $("cfgError").classList.remove("hidden");
+  updateSettingsButtons();
+}
+$("menuBtn").onclick = () => {
+  $("cfgCwd").value = appState.cwd || "";
+  $("cfgApproval").value = appState.approvalPolicy || "on-request";
+  $("cfgSandbox").value = appState.sandbox || "workspace-write";
+  $("cfgCustomModel").value = appState.model || "";
+  renderModelOptions(appState.model ? "model:" + appState.model : "default");
+  $("cfgError").classList.add("hidden");
+  $("sheet").classList.remove("hidden");
+  requestModels();
+};
+$("cfgModel").onchange = () => {
+  $("customModelRow").classList.toggle("hidden", $("cfgModel").value !== "custom");
+  $("cfgError").classList.add("hidden");
+};
+$("cfgCustomModel").oninput = () => $("cfgError").classList.add("hidden");
+$("modelsRefresh").onclick = requestModels;
 $("sheetClose").onclick = () => $("sheet").classList.add("hidden");
-$("cfgApply").onclick = () => {
-  sendWs({
+function saveSettings(newThread = false) {
+  if (pendingConfig) return;
+  const selected = $("cfgModel").value;
+  const model = selected === "default" ? null : selected === "custom" ? $("cfgCustomModel").value.trim() : selected.slice(6);
+  if (selected === "custom" && (!model || /\s|[\x00-\x1f\x7f]/.test(model))) {
+    configError("请输入有效的模型 ID");
+    return;
+  }
+  pendingConfig = { requestId: "settings-" + Date.now(), newThread };
+  $("cfgError").classList.add("hidden");
+  updateSettingsButtons();
+  if (!sendWs({
     type: "setConfig",
+    requestId: pendingConfig.requestId,
+    model,
     cwd: $("cfgCwd").value.trim() || undefined,
     approvalPolicy: $("cfgApproval").value,
     sandbox: $("cfgSandbox").value,
-  });
-  $("sheet").classList.add("hidden");
-};
-$("newThreadBtn").onclick = () => {
-  sendWs({ type: "newThread", cwd: $("cfgCwd").value.trim() || undefined });
-  $("sheet").classList.add("hidden");
-};
+  })) { configError("连接已断开，设置未保存"); return; }
+  configTimer = setTimeout(() => configError("保存确认超时，请重新连接后检查设置"), 12000);
+}
+$("cfgApply").onclick = () => saveSettings();
+$("newThreadBtn").onclick = () => saveSettings(true);
 function forget() {
   localStorage.removeItem(LS.profile); // keep keys so the device stays paired
   location.reload();
@@ -543,7 +673,7 @@ $("diffClose").onclick = () => $("diffSheet").classList.add("hidden");
 // ---------------------------------------------------------------------------
 function loadSessions() {
   $("sessionsList").innerHTML = '<p class="muted small">加载中…</p>';
-  sendWs({ type: "listThreads" });
+  if (!sendWs({ type: "listThreads" })) $("sessionsList").textContent = "连接已断开，无法加载会话";
 }
 $("sessionsBtn").onclick = () => { $("sessionsSheet").classList.remove("hidden"); loadSessions(); };
 $("sessionsRefresh").onclick = loadSessions;
@@ -560,7 +690,7 @@ function sessionItem(t) {
     `<div class="s-name">${escapeHtml(t.name || "(无标题)")}</div>` +
     `<div class="s-meta">${escapeHtml(when)}</div>`;
   item.onclick = () => {
-    sendWs({ type: "resumeThread", threadId: t.id });
+    sendWs({ type: "readThread", threadId: t.id });
     $("sessionsSheet").classList.add("hidden");
   };
   return item;
@@ -597,6 +727,67 @@ function renderProjectTree(tree) {
     projectless.forEach((t) => list.appendChild(sessionItem(t)));
   }
 }
+
+function updateWriterButtons() {
+  $("writerSheet").querySelectorAll("button").forEach((button) => { button.disabled = !!writerPending; });
+}
+function writerAction(type, extra = {}) {
+  if (!writerConflict || writerPending) return;
+  writerPending = "writer-" + Date.now();
+  $("writerStatus").textContent = type === "takeoverThread" ? "正在结束占用进程并尝试接续…" : "处理中…";
+  updateWriterButtons();
+  if (!sendWs({ type, threadId: writerConflict.threadId, requestId: writerPending, ...extra })) {
+    writerPending = null;
+    $("writerStatus").textContent = "连接已断开，操作未发送";
+    updateWriterButtons();
+    return;
+  }
+  writerTimer = setTimeout(() => {
+    writerPending = null;
+    $("writerStatus").textContent = "操作确认超时，请重新检查占用状态";
+    updateWriterButtons();
+  }, 30000);
+}
+function renderWriterConflict() {
+  writerChoice = null;
+  $("writerConfirm").classList.add("hidden");
+  $("writerStatus").textContent = "";
+  $("writerMessage").textContent = writerConflict.message;
+  const list = $("writerOwners");
+  list.replaceChildren();
+  (writerConflict.owners || []).forEach((owner) => {
+    const row = document.createElement("div"); row.className = "writer-owner";
+    const title = document.createElement("strong"); title.textContent = owner.name + " · PID " + owner.pid;
+    row.appendChild(title);
+    const affected = document.createElement("ul"); affected.className = "writer-threads mono";
+    (owner.affectedThreads || []).forEach((id) => { const li = document.createElement("li"); li.textContent = id; affected.appendChild(li); });
+    row.appendChild(affected);
+    if (owner.canTerminate && owner.token) {
+      const button = document.createElement("button"); button.className = "btn danger full";
+      button.textContent = "结束进程并尝试接续";
+      button.onclick = () => {
+        writerChoice = owner;
+        $("writerConfirmText").textContent = "确认强制结束 PID " + owner.pid + "？将中止该进程持有的 " + owner.affectedThreads.length + " 个会话，已产生的文件改动不会回滚。";
+        $("writerConfirm").classList.remove("hidden");
+        $("writerCancelBtn").focus();
+      };
+      row.appendChild(button);
+    } else {
+      const note = document.createElement("p"); note.className = "muted small";
+      note.textContent = "无法安全结束此进程，请在电脑端关闭对应会话。";
+      row.appendChild(note);
+    }
+    list.appendChild(row);
+  });
+  $("writerSheet").classList.remove("hidden");
+  updateWriterButtons();
+  $("writerRetry").focus();
+}
+$("writerRetry").onclick = () => writerAction("resumeThread");
+$("writerInspect").onclick = () => writerAction("inspectWriter");
+$("writerConfirmBtn").onclick = () => { if (writerChoice) writerAction("takeoverThread", { token: writerChoice.token, confirmed: true }); };
+$("writerCancelBtn").onclick = () => { writerChoice = null; $("writerConfirm").classList.add("hidden"); };
+$("writerClose").onclick = () => $("writerSheet").classList.add("hidden");
 
 // ---------------------------------------------------------------------------
 // Service worker + boot

@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  View, Text, TextInput, Pressable, ScrollView, StyleSheet,
+  View, Text, TextInput, Pressable, FlatList, StyleSheet,
   KeyboardAvoidingView, Platform, StatusBar, SafeAreaView, Alert,
 } from "react-native";
 import { C } from "./theme";
@@ -9,6 +9,7 @@ import SettingsModal from "./SettingsModal";
 import SessionsModal from "./SessionsModal";
 import DiffModal from "./DiffModal";
 import MembershipScreen from "./MembershipScreen";
+import WriterConflictModal from "./WriterConflictModal";
 import { ensureNotifPermission } from "./useRelay";
 
 const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
@@ -63,7 +64,15 @@ export default function MainScreen({ relay, onForget }) {
   const [showSessions, setShowSessions] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [showRedeem, setShowRedeem] = useState(false);
-  const scrollRef = useRef(null);
+  const pendingText = useRef(null);
+  useEffect(() => {
+    const pending = pendingText.current;
+    if (pending && events.some((e) => e.kind === "user" && e.text === pending.text && !pending.ids.has(e.id))) {
+      const accepted = pending.text;
+      pendingText.current = null;
+      setText((current) => current.trim() === accepted ? "" : current);
+    }
+  }, [events]);
 
   const openSessions = () => { actions.listThreads(); setShowSessions(true); };
 
@@ -80,8 +89,9 @@ export default function MainScreen({ relay, onForget }) {
     const t = text.trim();
     if (!t) return;
     if (steerMode) actions.steer(t);
-    else actions.prompt(t);
-    setText("");
+    else if (!actions.prompt(t)) return;
+    if (relayState.readOnly) pendingText.current = { text: t, ids: new Set(events.map((e) => e.id)) };
+    else setText("");
   };
 
   const enableNotif = async () => {
@@ -110,14 +120,14 @@ export default function MainScreen({ relay, onForget }) {
             <Pressable onPress={openSessions} hitSlop={10}>
               <Text style={s.gear}>📂</Text>
             </Pressable>
-            <Pressable onPress={() => setShowSettings(true)} hitSlop={10}>
+            <Pressable onPress={() => { actions.listModels(relayState.cwd); setShowSettings(true); }} hitSlop={10}>
               <Text style={s.gear}>⚙</Text>
             </Pressable>
           </View>
         </View>
         <Text style={s.subbar} numberOfLines={1}>
           {(relayState.threadName ? "「" + relayState.threadName + "」 " : "") +
-            (relayState.cwd || "—") + (relayState.model ? "  ·  " + relayState.model : "") + "  ·  " + (relayState.approvalPolicy || "") +
+            (relayState.cwd || "—") + ((relayState.effectiveModel || relayState.model) ? "  ·  " + (relayState.effectiveModel || relayState.model) : "") + "  ·  " + (relayState.approvalPolicy || "") +
             (cloud && agentFp ? "  ·  🔒" + agentFp : "")}
         </Text>
 
@@ -127,14 +137,16 @@ export default function MainScreen({ relay, onForget }) {
           keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
         >
           {/* Feed */}
-          <ScrollView
-            ref={scrollRef}
+          <FlatList
+            key={relayState.threadId || "new"}
             style={s.feed}
             contentContainerStyle={{ padding: 12, gap: 8 }}
-            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-          >
-            {events.map((e, i) => <EventRow key={e.id || i} e={e} />)}
-          </ScrollView>
+            inverted
+            data={events.slice().reverse()}
+            keyExtractor={(e, i) => e.id || String(i)}
+            renderItem={({ item }) => <EventRow e={item} />}
+            initialNumToRender={20}
+          />
 
           {/* Approvals */}
           {approvals.length > 0 && (
@@ -185,11 +197,13 @@ export default function MainScreen({ relay, onForget }) {
         <SettingsModal
           visible={showSettings}
           config={{ ...config, cwd: config.cwd || relayState.cwd }}
+          models={relay.models}
+          onRefreshModels={actions.listModels}
           cloud={cloud}
           membershipUntil={relay.membershipUntil}
           onRedeem={() => { setShowSettings(false); setShowRedeem(true); }}
-          onApply={(cfg) => { actions.applyConfig(cfg); setShowSettings(false); }}
-          onNewThread={(cwd) => { actions.newThread(cwd); setShowSettings(false); }}
+          onApply={async (cfg) => { await actions.applyConfig(cfg); setShowSettings(false); }}
+          onNewThread={async (cfg) => { await actions.applyConfig(cfg); actions.newThread(cfg.cwd); setShowSettings(false); }}
           onEnableNotif={enableNotif}
           onForget={forget}
           onClose={() => setShowSettings(false)}
@@ -199,11 +213,12 @@ export default function MainScreen({ relay, onForget }) {
         <SessionsModal
           visible={showSessions}
           tree={tree}
-          onResume={(id) => { actions.resumeThread(id); setShowSessions(false); }}
+          onResume={(id) => { actions.readThread(id); setShowSessions(false); }}
           onRefresh={() => actions.listThreads()}
           onClose={() => setShowSessions(false)}
         />
         <DiffModal visible={showDiff} diff={diff} onClose={() => setShowDiff(false)} />
+        <WriterConflictModal conflict={relay.writerConflict} busy={relay.writerBusy} error={relay.writerError} onRetry={actions.retryWriter} onInspect={actions.inspectWriter} onTakeover={actions.takeoverWriter} onClose={actions.dismissWriter} />
       </View>
     </SafeAreaView>
   );

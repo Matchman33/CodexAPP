@@ -1,6 +1,6 @@
 // Minimal service worker: makes the PWA installable and serves the app shell
 // offline. Network-first for navigations so updates land without a hard reset.
-const CACHE = "codexapp-v1";
+const CACHE = "codexapp-v4-thread-display";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./manifest.webmanifest", "./icon-180.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {

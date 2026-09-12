@@ -18,6 +18,8 @@ import crypto from "node:crypto";
 import { exec } from "node:child_process";
 import { WebSocket } from "ws";
 import { CodexBridge } from "../core/codexBridge.mjs";
+import { persistModel } from "../core/modelSettings.mjs";
+import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 import { loadOrCreateKeyPair, seal, open, fingerprint, sas } from "./e2e.mjs";
 
 function appDir() {
@@ -49,6 +51,7 @@ const DEFAULTS = {
   email: "", password: "", codexBin: "",
   defaultCwd: os.homedir(), approvalPolicy: "on-request", sandbox: "workspace-write", model: null,
   originator: "codex_vscode", panelPort: 7878,
+  preventSleep: true,
   // "open" = 同账号免码直连(像 TeamViewer);"code" = 需要配对码(更安全,防中间人)
   pairingMode: "open",
 };
@@ -84,6 +87,7 @@ function loadPairing() {
 function savePairing() { fs.writeFileSync(PAIRING_FILE, JSON.stringify(pairing, null, 2)); }
 
 const config = loadConfig();
+const sleepPrevention = createSleepPrevention(config);
 const keys = loadOrCreateKeyPair(KEYS_FILE);
 const pairing = loadPairing();
 fs.writeFileSync(PAIRING_TXT, pairing.code + "\n");
@@ -118,7 +122,7 @@ const bridge = new CodexBridge(config, (msg) => {
   // CodexApp data only flows to a PAIRED phone.
   if (!trusted || !phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type: "e2e", ...seal(msg, phonePubkey, keys.secretKey) }));
-});
+}, (model) => persistModel(CONFIG_FILE, model));
 
 function sendCtrl(obj) {
   if (!phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -192,7 +196,7 @@ function connect(token) {
         else sendCtrl({ type: "needPairing" }); // ignore commands until paired
         return;
       }
-      bridge.dispatch(inner).catch((e) => sendCtrl({ type: "error", message: e.message }));
+      bridge.dispatch(inner).catch((e) => sendCtrl({ type: "error", message: e.message, requestId: inner.requestId }));
       return;
     }
     if (m.type === "error") {
@@ -287,7 +291,7 @@ function startPanel(port, tries = 0) {
       if (req.method === "GET" && (req.url === "/" || req.url.startsWith("/?"))) {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(PANEL_HTML);
       }
-      if (req.method === "GET" && req.url === "/api/status") return send(200, status);
+      if (req.method === "GET" && req.url === "/api/status") return send(200, { ...status, sleepPrevention: sleepPrevention.status() });
 
       if (req.method === "POST" && req.url === "/api/register") {
         const b = await readJson(req);
@@ -340,6 +344,7 @@ function startPanel(port, tries = 0) {
     console.error("[panel] cannot start:", e.message);
   });
   server.listen(port, "127.0.0.1", () => {
+    void sleepPrevention.start();
     const url = "http://127.0.0.1:" + port;
     try { fs.writeFileSync(path.join(BASE, "panel.url"), url); } catch {} // so a launcher (Electron) knows the URL
     console.log("[panel] 控制面板: " + url);

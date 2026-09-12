@@ -15,6 +15,10 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { resolveCodexBin } from "../core/codexBridge.mjs";
+import { ModelSettings, persistModel } from "../core/modelSettings.mjs";
+import { WriterControl, isWriterConflict } from "../core/writerControl.mjs";
+import { listProjectTree, readThreadHistory, historyEvents, itemToEvent } from "../core/threadDisplay.mjs";
+import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -42,6 +46,8 @@ const DEFAULT_CONFIG = {
   sandbox: "workspace-write",
   // Optional model override (null = use Codex default from config.toml).
   model: null,
+  // Windows only: keep the system awake while this service is running.
+  preventSleep: true,
   // Client identifier (originator) Codex reports upstream. Some API relays only
   // accept "official" Codex clients; the relay drives the official app-server, so
   // it identifies as one. Override if your provider expects a different value.
@@ -71,11 +77,11 @@ function loadConfig() {
 }
 
 const config = loadConfig();
+const sleepPrevention = createSleepPrevention(config);
 
 // ---------------------------------------------------------------------------
 // Shared relay state (mirrored to every connected phone)
 // ---------------------------------------------------------------------------
-const EVENT_LOG_CAP = 400;
 const state = {
   codexConnected: false,
   codexVersion: null,
@@ -84,18 +90,21 @@ const state = {
   cwd: config.defaultCwd,
   status: "idle", // "idle" | "running"
   model: config.model,
+  effectiveModel: null,
   approvalPolicy: config.approvalPolicy,
   sandbox: config.sandbox,
   threadName: null, // user-facing name of the active conversation
+  readOnly: false,
   lastDiff: "", // latest unified diff for the current turn
 };
-const eventLog = []; // ring buffer of normalized feed entries
+const eventLog = []; // Complete normalized history for the displayed conversation.
 const pendingApprovals = new Map(); // key -> { serverReqId, method, approval }
 
 function pushEvent(entry) {
   const e = { id: crypto.randomUUID(), ts: Date.now(), ...entry };
-  eventLog.push(e);
-  if (eventLog.length > EVENT_LOG_CAP) eventLog.shift();
+  const index = eventLog.findIndex((old) => old.id === e.id);
+  if (index < 0) eventLog.push(e);
+  else eventLog[index] = e;
   broadcast({ type: "event", event: e });
   return e;
 }
@@ -213,6 +222,8 @@ class CodexClient {
 }
 
 const codex = new CodexClient(config.codexBin);
+const models = new ModelSettings(codex, config, (model) => persistModel(CONFIG_PATH, model));
+const writers = new WriterControl({ protectedPids: () => [process.pid, codex.child?.pid] });
 
 // ---------------------------------------------------------------------------
 // Approval normalization: turn a server->client approval request into a
@@ -341,6 +352,7 @@ codex.onServerRequest = (msg) => {
 // ---------------------------------------------------------------------------
 function handleNotification(msg) {
   const { method, params } = msg;
+  if (params?.threadId && (state.readOnly || (state.threadId && params.threadId !== state.threadId))) return;
   switch (method) {
     case "thread/started":
       if (params?.thread?.id) state.threadId = params.thread.id;
@@ -359,6 +371,18 @@ function handleNotification(msg) {
       state.lastDiff = params?.diff || "";
       broadcast({ type: "diff", diff: state.lastDiff });
       break;
+    case "model/rerouted":
+      if (params?.threadId === state.threadId && params?.toModel) {
+        state.effectiveModel = params.toModel;
+        broadcastState();
+      }
+      break;
+    case "thread/settings/updated":
+      if (params?.threadId === state.threadId && params?.threadSettings?.model) {
+        state.effectiveModel = params.threadSettings.model;
+        broadcastState();
+      }
+      break;
     case "turn/completed": {
       state.status = "idle";
       const usage = params?.turn?.usage || params?.turn?.tokenUsage;
@@ -373,9 +397,16 @@ function handleNotification(msg) {
     case "item/completed":
       describeItem(params?.item, "completed");
       break;
-    case "item/agentMessage/delta":
-      if (params?.delta) broadcast({ type: "assistantDelta", text: params.delta });
+    case "item/agentMessage/delta": {
+      if (!params?.delta) break;
+      const id = [state.threadId, params.turnId || state.turnId, params.itemId].join(":");
+      const index = eventLog.findIndex((e) => e.id === id);
+      const previous = index < 0 ? null : eventLog[index];
+      const event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, text: (previous?.text || "") + params.delta, live: true };
+      if (index < 0) eventLog.push(event); else eventLog[index] = event;
+      broadcast({ type: "assistantDelta", text: params.delta, itemId: params.itemId, turnId: params.turnId, threadId: params.threadId });
       break;
+    }
     case "item/commandExecution/outputDelta":
     case "command/exec/outputDelta": {
       const chunk = params?.chunk || params?.delta || params?.output;
@@ -411,34 +442,10 @@ function handleNotification(msg) {
 }
 
 function describeItem(item, phase) {
-  if (!item) return;
-  let text = null;
-  switch (item.type) {
-    case "agentMessage":
-      if (phase === "completed" && item.text) text = item.text;
-      break;
-    case "reasoning":
-      if (phase === "started") text = "思考中…";
-      break;
-    case "commandExecution":
-      if (phase === "started") text = "$ " + item.command;
-      else if (phase === "completed")
-        text = `$ ${item.command}  →  exit ${item.exitCode ?? "?"}`;
-      break;
-    case "fileChange":
-      text = (phase === "started" ? "改动文件: " : "已改动文件: ") +
-        (item.changes || []).map((c) => c.path || c.path_string || "?").join(", ");
-      break;
-    case "webSearch":
-      if (phase === "started") text = "🔍 " + (item.query || "");
-      break;
-    case "mcpToolCall":
-      if (phase === "started") text = `工具: ${item.server}/${item.tool}`;
-      break;
-    default:
-      break;
-  }
-  if (text) pushEvent({ kind: "item:" + item.type, text });
+  if (!item || item.type === "userMessage") return;
+  if (phase !== "completed" && item.type !== "commandExecution") return;
+  const event = itemToEvent(item);
+  if (event) pushEvent({ ...event, id: [state.threadId, state.turnId, item.id].join(":"), threadId: state.threadId, turnId: state.turnId });
 }
 
 codex.onNotification = handleNotification;
@@ -461,23 +468,32 @@ async function bootstrapCodex() {
 // ---------------------------------------------------------------------------
 // Actions triggered by the phone
 // ---------------------------------------------------------------------------
-async function ensureThread(cwd) {
-  if (state.threadId) return state.threadId;
+async function ensureThread(cwd, model) {
+  if (state.threadId) {
+    if (state.readOnly) {
+      const conflict = await resumeThread(state.threadId);
+      if (conflict) { broadcast(conflict); return null; }
+    }
+    return state.threadId;
+  }
   const params = {
     cwd: cwd || state.cwd,
     approvalPolicy: state.approvalPolicy,
     sandbox: state.sandbox,
   };
-  if (state.model) params.model = state.model;
+  params.model = model || await models.resolve(params.cwd);
   const res = await codex.request("thread/start", params);
   state.threadId = res?.thread?.id || res?.threadId || state.threadId;
   state.cwd = params.cwd;
+  state.effectiveModel = res?.model || params.model;
   broadcastState();
   return state.threadId;
 }
 
 async function startTurn(text, cwd) {
-  await ensureThread(cwd);
+  if (!text) return;
+  const model = await models.resolve(cwd || state.cwd);
+  if (!await ensureThread(cwd, model)) return;
   const params = {
     threadId: state.threadId,
     input: [{ type: "text", text, text_elements: [] }],
@@ -487,9 +503,10 @@ async function startTurn(text, cwd) {
     sandboxPolicy: undefined, // sandbox set at thread level; leave turn default
   };
   if (cwd) params.cwd = cwd;
-  if (state.model) params.model = state.model;
+  params.model = model;
   pushEvent({ kind: "user", text });
   const res = await codex.request("turn/start", params);
+  state.effectiveModel = model;
   state.turnId = res?.turn?.id || res?.id || state.turnId;
   state.status = "running";
   broadcastState();
@@ -505,9 +522,9 @@ async function steerTurn(text) {
   });
 }
 
-async function interruptTurn() {
-  if (!state.threadId) throw new Error("没有会话");
-  await codex.request("turn/interrupt", { threadId: state.threadId });
+async function interruptTurn(threadId = state.threadId, turnId = state.turnId) {
+  if (!threadId || !turnId) throw new Error("没有可停止的任务；请先接续会话。");
+  await codex.request("turn/interrupt", { threadId, turnId });
   pushEvent({ kind: "turn", text: "已请求中断" });
 }
 
@@ -529,105 +546,63 @@ async function resolveApproval(key, optionId) {
 }
 
 async function newThread(cwd) {
+  if (state.status === "running") throw new Error("请先停止当前任务再新建会话");
   state.threadId = null;
   state.turnId = null;
   state.status = "idle";
   state.threadName = null;
+  state.readOnly = false;
+  eventLog.length = 0;
+  broadcast(snapshot());
   state.lastDiff = "";
   if (cwd) state.cwd = cwd;
   await ensureThread(cwd);
   pushEvent({ kind: "thread", text: "新建会话 @ " + state.cwd });
 }
 
-// Build the SAME project tree the Codex desktop shows: projects (order + labels
-// from .codex-global-state.json), conversations assigned by cwd-under-root, and
-// the explicit projectless list as the flat 对话 group.
 async function buildProjectTree() {
-  const res = await codex.request("thread/list", { limit: 200 });
-  const threads = (res?.data || []).map((t) => ({
-    id: t.id, name: t.name || t.preview || "(无标题)", cwd: t.cwd || null,
-    updatedAt: t.updatedAt || t.recencyAt || t.createdAt || 0, source: t.source || null,
-  }));
-
-  let order = [], labels = {}, projectless = new Set();
-  try {
-    const gs = JSON.parse(fs.readFileSync(path.join(CODEX_HOME, ".codex-global-state.json"), "utf8"));
-    order = gs["project-order"] || gs["electron-saved-workspace-roots"] || [];
-    labels = gs["electron-workspace-root-labels"] || {};
-    projectless = new Set(gs["projectless-thread-ids"] || []);
-  } catch (e) {
-    console.error("[tree] global-state read failed:", e.message);
-  }
-
-  const lastSeg = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
-  const norm = (p) => (p || "").replace(/[\\/]+$/, "").toLowerCase();
-  const projects = order.map((r) => ({ root: r, label: labels[r] || lastSeg(r), threads: [] }));
-  const flat = [];
-  for (const t of threads) {
-    if (projectless.has(t.id)) { flat.push(t); continue; } // 对话 = exactly Codex's projectless list
-    const c = norm(t.cwd);
-    let best = null;
-    for (const p of projects) {
-      const n = norm(p.root);
-      if (c === n || c.startsWith(n + "\\") || c.startsWith(n + "/")) {
-        if (!best || norm(best.root).length < n.length) best = p;
-      }
-    }
-    // Only show what the desktop tracks: a project (by cwd) or projectless.
-    // Threads in neither (e.g. ad-hoc chats elsewhere) are not shown, matching Codex.
-    if (best) best.threads.push(t);
-  }
-  const byRecency = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
-  projects.forEach((p) => p.threads.sort(byRecency));
-  flat.sort(byRecency);
-  return { projects, projectless: flat };
+  return listProjectTree(codex, CODEX_HOME);
 }
 
-// Convert a historical thread item into a feed event (or null to skip).
-function itemToEvent(it) {
-  switch (it.type) {
-    case "userMessage": {
-      const text = (it.content || []).filter((c) => c.type === "text").map((c) => c.text).join("").trim();
-      return text ? { kind: "user", text } : null;
-    }
-    case "agentMessage": return it.text ? { kind: "item:agentMessage", text: it.text } : null;
-    case "commandExecution": return { kind: "item:commandExecution", text: "$ " + it.command + (it.exitCode != null ? `  →  exit ${it.exitCode}` : "") };
-    case "fileChange": return { kind: "item:fileChange", text: "已改动文件: " + (it.changes || []).map((c) => c.path || "?").join(", ") };
-    case "webSearch": return { kind: "item:webSearch", text: "🔍 " + (it.query || "") };
-    case "mcpToolCall": return { kind: "item:mcpToolCall", text: `工具: ${it.server}/${it.tool}` };
-    default: return null;
-  }
+async function readThread(threadId) {
+  if (state.status === "running") throw new Error("请先停止当前任务再切换会话");
+  const t = await readThreadHistory(codex, threadId);
+  state.threadId = t.id;
+  state.cwd = t.cwd || state.cwd;
+  state.threadName = t.name || t.preview || null;
+  state.turnId = null;
+  state.status = "idle";
+  state.readOnly = true;
+  state.effectiveModel = null;
+  state.lastDiff = "";
+  eventLog.splice(0, eventLog.length, ...historyEvents(t));
+  broadcast(snapshot());
 }
 
 // Resume an existing conversation AND load its history so clients show the
 // same messages Codex shows. Rebuilds the feed from thread.turns[].items[].
 async function resumeThread(threadId) {
-  const res = await codex.request("thread/resume", {
-    threadId,
-    approvalPolicy: state.approvalPolicy,
-    sandbox: state.sandbox,
-  });
+  if (state.status === "running" && state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
+  let res;
+  try {
+    res = await codex.request("thread/resume", { threadId, approvalPolicy: state.approvalPolicy, sandbox: state.sandbox });
+  } catch (error) {
+    if (!isWriterConflict(error)) throw error;
+    return writers.inspect(threadId);
+  }
   const t = res?.thread || {};
   state.threadId = t.id || threadId;
   state.cwd = t.cwd || state.cwd;
-  state.turnId = null;
-  state.status = "idle";
+  const activeTurn = (t.turns || []).findLast((turn) => turn.status === "inProgress");
+  state.turnId = activeTurn?.id || null;
+  state.status = activeTurn ? "running" : "idle";
   state.lastDiff = "";
   state.threadName = t.name || t.preview || null;
+  state.effectiveModel = res?.model || null;
 
-  // Rebuild the feed from the conversation's history.
-  const events = [];
-  let n = 0;
-  for (const turn of t.turns || []) {
-    const base = turn.startedAt ? turn.startedAt * 1000 : Date.now();
-    for (const it of turn.items || []) {
-      const e = itemToEvent(it);
-      if (e) events.push({ id: crypto.randomUUID(), ts: base + n++, ...e });
-    }
-  }
-  events.push({ id: crypto.randomUUID(), ts: Date.now(), kind: "thread", text: `— 已接续会话「${state.threadName || state.threadId}」@ ${state.cwd} —` });
-  eventLog.length = 0;
-  eventLog.push(...events.slice(-EVENT_LOG_CAP));
+  state.readOnly = false;
+  const history = await readThreadHistory(codex, state.threadId, t);
+  eventLog.splice(0, eventLog.length, ...historyEvents(history));
 
   // Push a fresh snapshot so every client repopulates its feed with the history.
   broadcast(snapshot());
@@ -651,7 +626,7 @@ const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
   if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, codexConnected: state.codexConnected }));
+    res.end(JSON.stringify({ ok: true, codexConnected: state.codexConnected, sleepPrevention: sleepPrevention.status() }));
     return;
   }
   let p = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -674,6 +649,7 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 const clients = new Set();
+let commandQueue = Promise.resolve();
 
 function send(ws, obj) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
@@ -690,9 +666,9 @@ function snapshot() {
   return {
     type: "hello",
     state,
-    config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd },
+    config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd, model: state.model },
     pendingApprovals: [...pendingApprovals.values()].map((v) => v.approval),
-    recentEvents: eventLog.slice(-120),
+    recentEvents: eventLog,
     diff: state.lastDiff,
   };
 }
@@ -716,47 +692,69 @@ wss.on("connection", (ws, req) => {
     } catch {
       return;
     }
-    try {
-      switch (m.type) {
-        case "prompt":
-          await startTurn(String(m.text || "").trim(), m.cwd);
-          break;
-        case "steer":
-          await steerTurn(String(m.text || "").trim());
-          break;
-        case "interrupt":
-          await interruptTurn();
-          break;
-        case "approval":
-          await resolveApproval(m.key, m.optionId);
-          break;
-        case "newThread":
-          await newThread(m.cwd);
-          break;
-        case "listThreads": {
-          const tree = await buildProjectTree();
-          send(ws, { type: "projectTree", ...tree });
-          break;
+    commandQueue = commandQueue.catch(() => {}).then(async () => {
+      try {
+        switch (m.type) {
+          case "prompt":
+            await startTurn(String(m.text || "").trim(), m.cwd);
+            break;
+          case "steer":
+            await steerTurn(String(m.text || "").trim());
+            break;
+          case "interrupt":
+            await interruptTurn(m.threadId, m.turnId);
+            break;
+          case "approval":
+            await resolveApproval(m.key, m.optionId);
+            break;
+          case "newThread":
+            await newThread(m.cwd);
+            break;
+          case "listThreads": {
+            const tree = await buildProjectTree();
+            send(ws, { type: "projectTree", ...tree });
+            break;
+          }
+          case "resumeThread": {
+            const conflict = await resumeThread(m.threadId);
+            if (conflict) send(ws, conflict);
+            break;
+          }
+          case "readThread":
+            await readThread(m.threadId);
+            break;
+          case "inspectWriter":
+            send(ws, await writers.inspect(m.threadId));
+            break;
+          case "takeoverThread": {
+            await writers.terminate(m.threadId, m.token, m.confirmed === true);
+            pushEvent({ kind: "thread", text: "占用进程已退出，正在尝试接续会话" });
+            const conflict = await resumeThread(m.threadId);
+            if (conflict) send(ws, conflict);
+            break;
+          }
+          case "listModels":
+            send(ws, await models.list(m.cwd || state.cwd));
+            break;
+          case "setConfig":
+            if (Object.hasOwn(m, "model")) state.model = models.select(m.model);
+            if (m.approvalPolicy) state.approvalPolicy = m.approvalPolicy;
+            if (m.sandbox) state.sandbox = m.sandbox;
+            if (m.cwd) state.cwd = m.cwd;
+            broadcastState();
+            send(ws, { type: "configSaved", requestId: m.requestId });
+            break;
+          case "getState":
+            send(ws, snapshot());
+            break;
+          default:
+            break;
         }
-        case "resumeThread":
-          await resumeThread(m.threadId);
-          break;
-        case "setConfig":
-          if (m.approvalPolicy) state.approvalPolicy = m.approvalPolicy;
-          if (m.sandbox) state.sandbox = m.sandbox;
-          if (m.cwd) state.cwd = m.cwd;
-          broadcastState();
-          break;
-        case "getState":
-          send(ws, snapshot());
-          break;
-        default:
-          break;
+      } catch (e) {
+        send(ws, { type: "error", message: e.message, requestId: m.requestId });
+        pushEvent({ kind: "error", text: e.message });
       }
-    } catch (e) {
-      send(ws, { type: "error", message: e.message });
-      pushEvent({ kind: "error", text: e.message });
-    }
+    });
   });
 
   ws.on("close", () => {
@@ -787,6 +785,7 @@ async function main() {
   }
   codex.start();
   await bootstrapCodex();
+  await sleepPrevention.start();
   httpServer.listen(config.port, config.host, () => {
     const ips = Object.values(os.networkInterfaces())
       .flat()

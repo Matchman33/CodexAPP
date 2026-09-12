@@ -21,18 +21,42 @@ function Chips({ value, options, onPick }) {
   );
 }
 
-export default function SettingsModal({ visible, config, cloud, membershipUntil, onRedeem, onApply, onNewThread, onEnableNotif, onForget, onClose }) {
+export default function SettingsModal({ visible, config, models, onRefreshModels, cloud, membershipUntil, onRedeem, onApply, onNewThread, onEnableNotif, onForget, onClose }) {
   const [cwd, setCwd] = useState("");
   const [policy, setPolicy] = useState("on-request");
   const [sandbox, setSandbox] = useState("workspace-write");
+  const [model, setModel] = useState("default");
+  const [customModel, setCustomModel] = useState("");
+  const [modelMenu, setModelMenu] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     if (visible) {
       setCwd(config.cwd || "");
       setPolicy(config.approvalPolicy || "on-request");
       setSandbox(config.sandbox || "workspace-write");
+      setModel(config.model ? (models.models.some((m) => m.model === config.model) ? "model:" + config.model : "custom") : "default");
+      setCustomModel(config.model || "");
+      setModelMenu(false); setSaving(false); setError("");
     }
   }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const options = [
+    { value: "default", label: models.defaultModel ? "Codex 默认（" + models.defaultModel + "）" : "Codex 默认" },
+    ...models.models.map((m) => ({ value: "model:" + m.model, label: m.displayName === m.model ? m.model : m.displayName + " · " + m.model })),
+    { value: "custom", label: "自定义模型" },
+  ];
+  const submit = async (create) => {
+    if (saving) return;
+    const selected = model === "default" ? null : model === "custom" ? customModel.trim() : model.slice(6);
+    if (model === "custom" && (!selected || /\s|[\x00-\x1f\x7f]/.test(selected))) { setError("请输入有效的模型 ID"); return; }
+    setSaving(true); setError("");
+    try {
+      await (create ? onNewThread : onApply)({ cwd: cwd.trim() || undefined, approvalPolicy: policy, sandbox, model: selected });
+    } catch (e) { setError(e.message || String(e)); }
+    finally { setSaving(false); }
+  };
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -44,6 +68,34 @@ export default function SettingsModal({ visible, config, cloud, membershipUntil,
             <Text style={s.label}>工作目录 (cwd)</Text>
             <TextInput style={s.input} value={cwd} onChangeText={setCwd} autoCapitalize="none" autoCorrect={false} placeholder="C:\\test" placeholderTextColor={C.muted} />
 
+            <Text style={s.label}>模型</Text>
+            <View style={s.modelRow}>
+              <Pressable accessibilityRole="button" accessibilityLabel="选择模型" accessibilityState={{ expanded: modelMenu }} style={[s.input, s.modelSelect]} onPress={() => setModelMenu((v) => !v)}>
+                <Text style={s.modelText} numberOfLines={1}>{options.find((o) => o.value === model)?.label || model.slice(6)}</Text>
+                <Text style={s.modelText}>⌄</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" disabled={models.loading} onPress={() => onRefreshModels(cwd.trim() || undefined)} style={s.refresh}>
+                <Text style={{ color: models.loading ? C.muted : C.accent2 }}>刷新</Text>
+              </Pressable>
+            </View>
+            {modelMenu && (
+              <ScrollView style={s.modelMenu} nestedScrollEnabled>
+                {options.map((o) => (
+                  <Pressable key={o.value} accessibilityRole="radio" accessibilityState={{ checked: model === o.value }} onPress={() => { setModel(o.value); setModelMenu(false); setError(""); }} style={s.modelOption}>
+                    <Text style={{ color: model === o.value ? C.accent : C.muted }}>{model === o.value ? "●" : "○"}</Text>
+                    <Text style={[s.modelText, { flex: 1 }]}>{o.label}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+            {model === "custom" && (
+              <>
+                <Text style={s.label}>模型 ID</Text>
+                <TextInput accessibilityLabel="模型 ID" style={s.input} value={customModel} onChangeText={(value) => { setCustomModel(value); setError(""); }} maxLength={200} autoCapitalize="none" autoCorrect={false} />
+              </>
+            )}
+            {!!(models.loading || models.error || !models.models.length) && <Text style={s.label}>{models.loading ? "加载中…" : models.error ? "模型列表加载不完整：" + models.error : "暂无可选模型"}</Text>}
+
             <Text style={s.label}>审批策略</Text>
             <Chips value={policy} options={POLICIES} onPick={setPolicy} />
 
@@ -51,14 +103,15 @@ export default function SettingsModal({ visible, config, cloud, membershipUntil,
             <Chips value={sandbox} options={SANDBOXES} onPick={setSandbox} />
 
             <View style={s.row}>
-              <Pressable style={[s.btn, s.primary]} onPress={() => onApply({ cwd: cwd.trim() || undefined, approvalPolicy: policy, sandbox })}>
-                <Text style={[s.btnText, { color: "#042" }]}>应用 (下个会话)</Text>
+              <Pressable disabled={saving} style={[s.btn, s.primary, saving && { opacity: 0.5 }]} onPress={() => submit(false)}>
+                <Text style={[s.btnText, { color: "#042" }]}>{saving ? "保存中…" : "应用"}</Text>
               </Pressable>
-              <Pressable style={[s.btn, s.secondary]} onPress={() => onNewThread(cwd.trim() || undefined)}>
+              <Pressable disabled={saving} style={[s.btn, s.secondary]} onPress={() => submit(true)}>
                 <Text style={s.btnText}>新建会话</Text>
               </Pressable>
             </View>
 
+            {!!error && <Text accessibilityRole="alert" style={[s.label, { color: C.danger }]}>{error}</Text>}
             <Pressable style={[s.btn, s.secondary, s.full]} onPress={onEnableNotif}>
               <Text style={s.btnText}>开启审批通知</Text>
             </Pressable>
@@ -89,6 +142,12 @@ const s = StyleSheet.create({
   h2: { color: C.text, fontSize: 20, fontWeight: "800", marginBottom: 6 },
   label: { color: C.muted, fontSize: 13, marginTop: 12, marginBottom: 6 },
   input: { backgroundColor: C.bg2, color: C.text, borderColor: C.line, borderWidth: 1, borderRadius: 10, padding: 12, fontSize: 15 },
+  modelRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+  modelSelect: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8, minHeight: 48, borderRadius: 8 },
+  modelText: { color: C.text, fontSize: 15, flexShrink: 1 },
+  refresh: { minWidth: 48, minHeight: 48, justifyContent: "center", alignItems: "center" },
+  modelMenu: { maxHeight: 220, borderColor: C.line, borderWidth: 1, borderRadius: 8, marginTop: 4, backgroundColor: C.bg2 },
+  modelOption: { flexDirection: "row", alignItems: "center", gap: 10, padding: 12, minHeight: 44, borderBottomWidth: 1, borderBottomColor: C.line },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: { borderColor: C.line, borderWidth: 1, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: C.bg2 },
   chipOn: { backgroundColor: C.accent2, borderColor: C.accent2 },

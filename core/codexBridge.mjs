@@ -14,10 +14,12 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
+import { ModelSettings } from "./modelSettings.mjs";
+import { WriterControl, isWriterConflict } from "./writerControl.mjs";
+import { listProjectTree, readThreadHistory, historyEvents, itemToEvent } from "./threadDisplay.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
-const EVENT_LOG_CAP = 400;
 
 // Locate the `codex` binary across OSes. Codex (desktop app) bundles it under a
 // hash-named dir that changes on update; CLI installs (npm -g / brew) put it on PATH.
@@ -179,36 +181,26 @@ function approvalResult(method, optionId) {
   }
 }
 
-// Convert a historical thread item into a feed event (or null to skip).
-function itemToEvent(it) {
-  switch (it.type) {
-    case "userMessage": {
-      const text = (it.content || []).filter((c) => c.type === "text").map((c) => c.text).join("").trim();
-      return text ? { kind: "user", text } : null;
-    }
-    case "agentMessage": return it.text ? { kind: "item:agentMessage", text: it.text } : null;
-    case "commandExecution": return { kind: "item:commandExecution", text: "$ " + it.command + (it.exitCode != null ? `  →  exit ${it.exitCode}` : "") };
-    case "fileChange": return { kind: "item:fileChange", text: "已改动文件: " + (it.changes || []).map((c) => c.path || "?").join(", ") };
-    case "webSearch": return { kind: "item:webSearch", text: "🔍 " + (it.query || "") };
-    case "mcpToolCall": return { kind: "item:mcpToolCall", text: `工具: ${it.server}/${it.tool}` };
-    default: return null;
-  }
-}
+
 
 export class CodexBridge {
-  constructor(config, emit) {
+  constructor(config, emit, saveModel) {
     this.config = config;
     if (!this.config.defaultCwd) this.config.defaultCwd = os.homedir(); // empty/missing -> home
     this.emit = emit; // (msg) => void  — outbound CodexApp message
     this.state = {
       codexConnected: false, codexVersion: null, threadId: null, turnId: null,
       cwd: config.defaultCwd, status: "idle", model: config.model || null,
+      effectiveModel: null,
       approvalPolicy: config.approvalPolicy, sandbox: config.sandbox,
-      threadName: null, lastDiff: "",
+      threadName: null, lastDiff: "", readOnly: false,
     };
     this.eventLog = [];
     this.pendingApprovals = new Map();
+    this.commandQueue = Promise.resolve();
     this.codex = new CodexClient(config.codexBin);
+    this.models = new ModelSettings(this.codex, config, saveModel);
+    this.writers = new WriterControl({ protectedPids: () => [process.pid, this.codex.child?.pid] });
     this.codex.onNotification = (m) => this._onNotification(m);
     this.codex.onServerRequest = (m) => this._onServerRequest(m);
     this.codex.onExit = (code, sig) => {
@@ -252,8 +244,9 @@ export class CodexBridge {
   // ---- outbound helpers ----
   _pushEvent(entry) {
     const e = { id: crypto.randomUUID(), ts: Date.now(), ...entry };
-    this.eventLog.push(e);
-    if (this.eventLog.length > EVENT_LOG_CAP) this.eventLog.shift();
+    const index = this.eventLog.findIndex((old) => old.id === e.id);
+    if (index < 0) this.eventLog.push(e);
+    else this.eventLog[index] = e;
     this.emit({ type: "event", event: e });
     return e;
   }
@@ -263,9 +256,9 @@ export class CodexBridge {
     return {
       type: "hello",
       state: this.state,
-      config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd },
+      config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd, model: this.state.model },
       pendingApprovals: [...this.pendingApprovals.values()].map((v) => v.approval),
-      recentEvents: this.eventLog.slice(-120),
+      recentEvents: this.eventLog,
       diff: this.state.lastDiff,
     };
   }
@@ -282,6 +275,7 @@ export class CodexBridge {
   _onNotification(msg) {
     const { method, params } = msg;
     const st = this.state;
+    if (params?.threadId && (st.readOnly || (st.threadId && params.threadId !== st.threadId))) return;
     switch (method) {
       case "thread/started":
         if (params?.thread?.id) st.threadId = params.thread.id;
@@ -299,6 +293,18 @@ export class CodexBridge {
         st.lastDiff = params?.diff || "";
         this.emit({ type: "diff", diff: st.lastDiff });
         break;
+      case "model/rerouted":
+        if (params?.threadId === st.threadId && params?.toModel) {
+          st.effectiveModel = params.toModel;
+          this._broadcastState();
+        }
+        break;
+      case "thread/settings/updated":
+        if (params?.threadId === st.threadId && params?.threadSettings?.model) {
+          st.effectiveModel = params.threadSettings.model;
+          this._broadcastState();
+        }
+        break;
       case "turn/completed": {
         st.status = "idle";
         const usage = params?.turn?.usage || params?.turn?.tokenUsage;
@@ -309,9 +315,16 @@ export class CodexBridge {
       }
       case "item/started": this._describeItem(params?.item, "started"); break;
       case "item/completed": this._describeItem(params?.item, "completed"); break;
-      case "item/agentMessage/delta":
-        if (params?.delta) this.emit({ type: "assistantDelta", text: params.delta });
+      case "item/agentMessage/delta": {
+        if (!params?.delta) break;
+        const id = [st.threadId, params.turnId || st.turnId, params.itemId].join(":");
+        const index = this.eventLog.findIndex((e) => e.id === id);
+        const previous = index < 0 ? null : this.eventLog[index];
+        const event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, text: (previous?.text || "") + params.delta, live: true };
+        if (index < 0) this.eventLog.push(event); else this.eventLog[index] = event;
+        this.emit({ type: "assistantDelta", text: params.delta, itemId: params.itemId, turnId: params.turnId, threadId: params.threadId });
         break;
+      }
       case "item/commandExecution/outputDelta":
       case "command/exec/outputDelta": {
         const chunk = params?.chunk || params?.delta || params?.output;
@@ -337,50 +350,57 @@ export class CodexBridge {
   }
 
   _describeItem(item, phase) {
-    if (!item) return;
-    let text = null;
-    switch (item.type) {
-      case "agentMessage": if (phase === "completed" && item.text) text = item.text; break;
-      case "reasoning": if (phase === "started") text = "思考中…"; break;
-      case "commandExecution":
-        text = phase === "started" ? "$ " + item.command : `$ ${item.command}  →  exit ${item.exitCode ?? "?"}`;
-        break;
-      case "fileChange":
-        text = (phase === "started" ? "改动文件: " : "已改动文件: ") + (item.changes || []).map((c) => c.path || "?").join(", ");
-        break;
-      case "webSearch": if (phase === "started") text = "🔍 " + (item.query || ""); break;
-      case "mcpToolCall": if (phase === "started") text = `工具: ${item.server}/${item.tool}`; break;
-      default: break;
-    }
-    if (text) this._pushEvent({ kind: "item:" + item.type, text });
+    if (!item || item.type === "userMessage") return;
+    if (phase !== "completed" && item.type !== "commandExecution") return;
+    const event = itemToEvent(item);
+    if (event) this._pushEvent({ ...event, id: [this.state.threadId, this.state.turnId, item.id].join(":"), threadId: this.state.threadId, turnId: this.state.turnId });
   }
 
   // ---- client -> codex (actions) ----
-  async _ensureThread(cwd) {
-    if (this.state.threadId) return this.state.threadId;
+  async _ensureThread(cwd, model) {
+    if (this.state.threadId) {
+      if (this.state.readOnly && !await this._resumeThread(this.state.threadId)) return null;
+      return this.state.threadId;
+    }
     const params = { cwd: cwd || this.state.cwd, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox };
-    if (this.state.model) params.model = this.state.model;
+    params.model = model || await this.models.resolve(params.cwd);
     const res = await this.codex.request("thread/start", params);
     this.state.threadId = res?.thread?.id || res?.threadId || this.state.threadId;
     this.state.cwd = params.cwd;
+    this.state.effectiveModel = res?.model || params.model;
     this._broadcastState();
     return this.state.threadId;
   }
 
-  async dispatch(m) {
+  dispatch(m) {
+    const task = this.commandQueue.catch(() => {}).then(() => this._dispatchCommand(m));
+    this.commandQueue = task;
+    return task;
+  }
+
+  async _dispatchCommand(m) {
     switch (m.type) {
       case "prompt": return this._prompt(String(m.text || "").trim(), m.cwd);
       case "steer": return this._steer(String(m.text || "").trim());
-      case "interrupt": return this._interrupt();
+      case "interrupt": return this._interrupt(m.threadId, m.turnId);
       case "approval": return this._resolveApproval(m.key, m.optionId);
       case "newThread": return this._newThread(m.cwd);
       case "listThreads": return this._listThreads();
+      case "readThread": return this._readThread(m.threadId);
       case "resumeThread": return this._resumeThread(m.threadId);
+      case "inspectWriter": return this.emit(await this.writers.inspect(m.threadId));
+      case "takeoverThread":
+        await this.writers.terminate(m.threadId, m.token, m.confirmed === true);
+        this._pushEvent({ kind: "thread", text: "占用进程已退出，正在尝试接续会话" });
+        return this._resumeThread(m.threadId);
+      case "listModels": return this.emit(await this.models.list(m.cwd || this.state.cwd));
       case "setConfig":
+        if (Object.hasOwn(m, "model")) this.state.model = this.models.select(m.model);
         if (m.approvalPolicy) this.state.approvalPolicy = m.approvalPolicy;
         if (m.sandbox) this.state.sandbox = m.sandbox;
         if (m.cwd) this.state.cwd = m.cwd;
         this._broadcastState();
+        this.emit({ type: "configSaved", requestId: m.requestId });
         return;
       case "getState": return this.emit(this.snapshot());
       default: return;
@@ -389,12 +409,14 @@ export class CodexBridge {
 
   async _prompt(text, cwd) {
     if (!text) return;
-    await this._ensureThread(cwd);
+    const model = await this.models.resolve(cwd || this.state.cwd);
+    if (!await this._ensureThread(cwd, model)) return;
     const params = { threadId: this.state.threadId, input: [{ type: "text", text, text_elements: [] }], approvalPolicy: this.state.approvalPolicy };
     if (cwd) params.cwd = cwd;
-    if (this.state.model) params.model = this.state.model;
+    params.model = model;
     this._pushEvent({ kind: "user", text });
     const res = await this.codex.request("turn/start", params);
+    this.state.effectiveModel = model;
     this.state.turnId = res?.turn?.id || res?.id || this.state.turnId;
     this.state.status = "running";
     this._broadcastState();
@@ -404,9 +426,9 @@ export class CodexBridge {
     this._pushEvent({ kind: "user", text: "↪ " + text });
     await this.codex.request("turn/steer", { threadId: this.state.threadId, expectedTurnId: this.state.turnId, input: [{ type: "text", text, text_elements: [] }] });
   }
-  async _interrupt() {
-    if (!this.state.threadId) throw new Error("没有会话");
-    await this.codex.request("turn/interrupt", { threadId: this.state.threadId });
+  async _interrupt(threadId = this.state.threadId, turnId = this.state.turnId) {
+    if (!threadId || !turnId) throw new Error("没有可停止的任务；请先接续会话。");
+    await this.codex.request("turn/interrupt", { threadId, turnId });
     this._pushEvent({ kind: "turn", text: "已请求中断" });
   }
   async _resolveApproval(key, optionId) {
@@ -420,62 +442,55 @@ export class CodexBridge {
     this.emit({ type: "approvalResolved", key, by: "user" });
   }
   async _newThread(cwd) {
+    if (this.state.status === "running") throw new Error("请先停止当前任务再新建会话");
     this.state.threadId = null; this.state.turnId = null; this.state.status = "idle";
-    this.state.threadName = null; this.state.lastDiff = "";
+    this.state.threadName = null; this.state.lastDiff = ""; this.state.readOnly = false;
+    this.eventLog = [];
+    this.emit(this.snapshot());
     if (cwd) this.state.cwd = cwd;
     await this._ensureThread(cwd);
     this._pushEvent({ kind: "thread", text: "新建会话 @ " + this.state.cwd });
   }
   async _listThreads() {
-    const res = await this.codex.request("thread/list", { limit: 200 });
-    const threads = (res?.data || []).map((t) => ({ id: t.id, name: t.name || t.preview || "(无标题)", cwd: t.cwd || null, updatedAt: t.updatedAt || t.recencyAt || t.createdAt || 0, source: t.source || null }));
-    let order = [], labels = {}, projectless = new Set();
-    try {
-      const gs = JSON.parse(fs.readFileSync(path.join(CODEX_HOME, ".codex-global-state.json"), "utf8"));
-      order = gs["project-order"] || gs["electron-saved-workspace-roots"] || [];
-      labels = gs["electron-workspace-root-labels"] || {};
-      projectless = new Set(gs["projectless-thread-ids"] || []);
-    } catch {}
-    const lastSeg = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
-    const norm = (p) => (p || "").replace(/[\\/]+$/, "").toLowerCase();
-    const projects = order.map((r) => ({ root: r, label: labels[r] || lastSeg(r), threads: [] }));
-    const flat = [];
-    for (const t of threads) {
-      if (projectless.has(t.id)) { flat.push(t); continue; }
-      const c = norm(t.cwd);
-      let best = null;
-      for (const p of projects) {
-        const n = norm(p.root);
-        if (c === n || c.startsWith(n + "\\") || c.startsWith(n + "/")) if (!best || norm(best.root).length < n.length) best = p;
-      }
-      if (best) best.threads.push(t); // only desktop-tracked threads; drop ad-hoc others
-    }
-    const byRecency = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
-    projects.forEach((p) => p.threads.sort(byRecency));
-    flat.sort(byRecency);
-    this.emit({ type: "projectTree", projects, projectless: flat });
+    this.emit({ type: "projectTree", ...await listProjectTree(this.codex, CODEX_HOME) });
+  }
+  async _readThread(threadId) {
+    if (this.state.status === "running") throw new Error("请先停止当前任务再切换会话");
+    const t = await readThreadHistory(this.codex, threadId);
+    this.state.threadId = t.id;
+    this.state.cwd = t.cwd || this.state.cwd;
+    this.state.threadName = t.name || t.preview || null;
+    this.state.turnId = null;
+    this.state.status = "idle";
+    this.state.readOnly = true;
+    this.state.effectiveModel = null;
+    this.state.lastDiff = "";
+    this.eventLog = historyEvents(t);
+    this.emit(this.snapshot());
   }
   async _resumeThread(threadId) {
-    const res = await this.codex.request("thread/resume", { threadId, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox });
+    if (this.state.status === "running" && this.state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
+    let res;
+    try {
+      res = await this.codex.request("thread/resume", { threadId, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox });
+    } catch (error) {
+      if (!isWriterConflict(error)) throw error;
+      this.emit(await this.writers.inspect(threadId));
+      return;
+    }
     const t = res?.thread || {};
     this.state.threadId = t.id || threadId;
     this.state.cwd = t.cwd || this.state.cwd;
-    this.state.turnId = null; this.state.status = "idle"; this.state.lastDiff = "";
+    const activeTurn = (t.turns || []).findLast((turn) => turn.status === "inProgress");
+    this.state.turnId = activeTurn?.id || null;
+    this.state.status = activeTurn ? "running" : "idle";
+    this.state.lastDiff = "";
     this.state.threadName = t.name || t.preview || null;
-    // Rebuild the feed from the conversation's history so clients show the same
-    // messages Codex shows.
-    const events = [];
-    let n = 0;
-    for (const turn of t.turns || []) {
-      const base = turn.startedAt ? turn.startedAt * 1000 : Date.now();
-      for (const it of turn.items || []) {
-        const e = itemToEvent(it);
-        if (e) events.push({ id: crypto.randomUUID(), ts: base + n++, ...e });
-      }
-    }
-    events.push({ id: crypto.randomUUID(), ts: Date.now(), kind: "thread", text: `— 已接续会话「${this.state.threadName || this.state.threadId}」@ ${this.state.cwd} —` });
-    this.eventLog.length = 0;
-    this.eventLog.push(...events.slice(-EVENT_LOG_CAP));
+    this.state.effectiveModel = res?.model || null;
+    this.state.readOnly = false;
+    const history = await readThreadHistory(this.codex, this.state.threadId, t);
+    this.eventLog = historyEvents(history);
     this.emit(this.snapshot());
+    return true;
   }
 }

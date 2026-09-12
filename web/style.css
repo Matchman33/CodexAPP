@@ -74,6 +74,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent2); }
 .entry.thread, .entry.turn { background: transparent; color: var(--muted); font-size: 13px; text-align: center; padding: 4px; }
 .entry.error { background: #2a1620; color: var(--danger); border: 1px solid var(--danger); }
 .entry.tool, .entry.file { background: #101c33; border: 1px solid var(--line); font-size: 14px; }
+.feed { min-height: 0; }
+.entry { flex-shrink: 0; min-width: 0; }
+.entry summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry details[open] .body { margin-top: 8px; }
+.session-item { min-width: 0; overflow-wrap: anywhere; }
 
 /* ---------- Approvals ---------- */
 .approvals { padding: 0 12px; display: flex; flex-direction: column; gap: 10px; }
@@ -93,6 +98,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent2); }
 .running-bar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 6px; }
 .input-row { display: flex; gap: 8px; align-items: flex-end; }
 .input-row textarea { resize: none; max-height: 120px; }
+.input-row textarea { flex: 1; min-width: 0; width: auto; }
+.input-row .btn { flex: 0 0 auto; white-space: nowrap; }
 .steer-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .steer-toggle input { width: auto; }
 
@@ -114,6 +121,18 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent2); }
 .sheet-card label { font-size: 13px; color: var(--muted); margin-top: 6px; }
 .sheet-actions { display: flex; gap: 8px; margin-top: 10px; }
 .sheet-actions .btn { flex: 1; }
+.model-row { display: flex; align-items: center; gap: 8px; }
+.model-row select { flex: 1; min-width: 0; text-overflow: ellipsis; }
+.model-row .icon-btn { flex: 0 0 44px; height: 44px; cursor: pointer; }
+#customModelRow label { display: block; margin-bottom: 8px; }
+#modelsStatus, #cfgError { margin: 0; overflow-wrap: anywhere; }
+.settings-error { color: var(--danger); }
+.subbar { overflow-wrap: anywhere; }
+.sheet-actions .btn { min-width: 0; white-space: normal; }
+button:disabled { opacity: .5; cursor: default; }
+.writer-owner { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.writer-threads { padding-left: 18px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+#writerMessage, #writerConfirmText, #writerStatus { margin: 0; overflow-wrap: anywhere; }
 
 /* ---------- Diff bar + viewer ---------- */
 .diff-bar { margin: 0 12px 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--accent2); background: #0d1c33; color: var(--accent2); font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; }

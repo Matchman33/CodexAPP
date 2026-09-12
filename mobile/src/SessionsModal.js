@@ -20,11 +20,10 @@ export default function SessionsModal({ visible, tree, onResume, onRefresh, onCl
       <View style={s.backdrop}>
         <View style={s.sheet}>
           <Text style={s.h2}>会话 / 项目</Text>
-          <Text style={s.hint}>与电脑 Codex 的项目结构一致，点一条接着写。</Text>
           <ScrollView style={{ maxHeight: "70%" }}>
             {projects.length === 0 && projectless.length === 0 && <Text style={s.hint}>没有会话</Text>}
             {projects.map((p) => (
-              <View key={p.root}>
+              <View key={p.id || p.root}>
                 <Text style={s.groupName} numberOfLines={1}>📁 {p.label}  ({p.threads.length})</Text>
                 <Text style={s.groupPath} numberOfLines={1}>{p.root}</Text>
                 {p.threads.length === 0 && <Text style={s.empty}>暂无对话</Text>}
