@@ -80,10 +80,11 @@ try {
     assert.equal(await page.locator(".entry").count(), 0);
     const many = Array.from({ length: 100 }, (_, i) => ({ id: "long-" + i, kind: "item:agentMessage", text: "第 " + i + " 段长历史。\n\n" + "内容 ".repeat(30) }));
     socket.send(JSON.stringify(hello(many)));
-    await page.locator(".entry").nth(99).waitFor();
+    await page.locator('[data-event-id="long-99"]').waitFor();
+    assert(await page.locator(".entry").count() <= 60);
     await page.locator("#feed").evaluate((f) => { f.scrollTop = 0; f.dispatchEvent(new Event("scroll")); });
     socket.send(JSON.stringify({ type: "assistantDelta", itemId: "live", text: "新消息" }));
-    await page.locator('[data-item-id="live"]').waitFor();
+    await page.waitForFunction(() => document.querySelector("#feed").dataset.historyRows === "101");
     assert.equal(await page.locator("#feed").evaluate((f) => f.scrollTop), 0);
     await page.locator("#scrollBottom").click();
     assert(await page.locator("#feed").evaluate((f) => f.scrollTop > 0));

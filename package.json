@@ -10,6 +10,7 @@
     "prestart": "npm run build:web",
     "test": "node --test tests/*.test.mjs",
     "test:web": "npm run build:web && node tests/web-ui.integration.mjs",
+    "test:history-web": "npm run build:web && node tests/history-web.integration.mjs",
     "test:writer-process": "node tests/writerControl.windows.integration.mjs",
     "test:sleep-process": "node tests/sleepPrevention.windows.integration.mjs",
     "start": "node relay/server.mjs",

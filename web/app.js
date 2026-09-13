@@ -6,6 +6,12 @@
 const $ = (id) => document.getElementById(id);
 const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
 
+// Request/display IDs must also work on ordinary HTTP IP origins.
+function newClientId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 let ws = null;
 let backoff = 1000;
 let reconnectTimer = null;
@@ -18,15 +24,28 @@ let connectionLabel = "连接中…";
 let hostedRelay = false;
 let setupModeChosen = false;
 const CONNECT_TIMEOUT = 12000;
-let liveAssistant = null;   // the streaming assistant bubble (or null)
-const eventRows = new Map();
+let liveAssistant = null;
+const historyFeed = new window.HistoryFeed($("feed"), createEventRow, setEventText);
+let pendingSelection = null;
+let selectionTimer = null;
+let pageRequest = null;
+let pageTimer = null;
+const itemRequests = new Map();
+let historyPages = [];
+const pageCache = new Map();
+const recentOverlay = new Map();
+let pagedHistory = false;
+let oldestPage = 0;
+let newestPage = 0;
+const historyClientId = "history-" + Math.random().toString(36).slice(2);
+let lastSelectionId = null;
+let requestedPagedMode = false;
 let appState = {};
 let modelCatalog = [];
 let defaultModel = null;
 let defaultReasoningEffort = null;
 let lastProjectTree = null;
 let followLatest = true;
-let deltaFrame = null;
 const effortNames = { none: "关闭思考", minimal: "极低", low: "低", medium: "中等", high: "高", xhigh: "特高", max: "最高", ultra: "极致" };
 const effortName = (value) => effortNames[value] || value || "默认思考";
 const colorScheme = matchMedia("(prefers-color-scheme: dark)");
@@ -277,6 +296,11 @@ function connect() {
 }
 
 function disposeConnection() {
+  requestedPagedMode = false;
+  clearTimeout(selectionTimer); pendingSelection = null;
+  clearTimeout(pageTimer); pageRequest = null;
+  for (const request of itemRequests.values()) clearTimeout(request.timer);
+  itemRequests.clear();
   connectionAttempt++;
   clearTimeout(reconnectTimer); reconnectTimer = null;
   clearTimeout(connectionTimer); connectionTimer = null;
@@ -314,6 +338,7 @@ function relaySocketUrl(url, token) {
   parsed.pathname = parsed.pathname.replace(/\/+$/, "") + "/ws";
   parsed.search = ""; parsed.hash = "";
   parsed.searchParams.set("token", token);
+  parsed.searchParams.set("history", "paged");
   return parsed.href;
 }
 function connectLan(attempt) {
@@ -422,6 +447,7 @@ function scheduleReconnect(label = "连接已断开，正在重试") {
 }
 
 function sendWs(obj) {
+  if (["newThread", "getState"].includes(obj.type)) obj = { ...obj, historyMode: "paged" };
   if (!sessionReady || !ws || ws.readyState !== WebSocket.OPEN) return false;
   try {
     if (profile.mode === "cloud") {
@@ -454,21 +480,31 @@ $("reconnectBtn").onclick = resumeConnection;
 function handle(m) {
   switch (m.type) {
     case "hello":
+      if (m.requestId?.startsWith(historyClientId + "-select-") && m.requestId !== lastSelectionId) break;
+      if (pendingSelection && (m.requestId ? m.requestId !== pendingSelection.requestId : m.state?.threadId !== pendingSelection.threadId)) break;
+      clearTimeout(selectionTimer); pendingSelection = null;
+      clearTimeout(pageTimer); pageRequest = null;
+      for (const request of itemRequests.values()) clearTimeout(request.timer);
+      itemRequests.clear();
       clearTimeout(connectionTimer); connectionTimer = null;
       backoff = 1000; sessionReady = true;
       connectionLabel = "电脑 Codex 未连接";
       followLatest = true;
-      if (deltaFrame) cancelAnimationFrame(deltaFrame);
-      deltaFrame = null;
       clearTimeout(writerTimer);
       writerPending = null; writerConflict = null;
       $("writerSheet").classList.add("hidden");
       appState = m.state || {};
       applyState();
-      $("feed").innerHTML = "";
-      eventRows.clear();
       liveAssistant = null;
-      (m.recentEvents || []).forEach(renderEvent);
+      pagedHistory = !!m.history?.paged;
+      historyPages = [{ cursor: null, nextCursor: m.history?.nextCursor || null }];
+      pageCache.clear(); recentOverlay.clear(); oldestPage = newestPage = 0;
+      if (pagedHistory) {
+        pageCache.set(0, m.recentEvents || []);
+        if (!m.requestId) for (const e of m.recentEvents || []) recentOverlay.set(e.id, e);
+      }
+      historyFeed.replace(m.recentEvents || [], true);
+      updateHistoryControls();
       $("approvals").innerHTML = "";
       (m.pendingApprovals || []).forEach(renderApproval);
       if (m.config) {
@@ -479,10 +515,15 @@ function handle(m) {
       setDiff(m.diff || "");
       scrollFeed();
       if (!lastProjectTree) loadSessions();
+      if (pagedHistory && !m.requestId) requestHistoryPage(0, true);
+      if (!pagedHistory && !requestedPagedMode) { requestedPagedMode = true; sendWs({ type: "getState", historyMode: "paged" }); }
       break;
     case "state":
+      if (pendingSelection) break;
+      const completedTurn = appState.status === "running" && m.state?.status === "idle";
       appState = m.state || appState;
       applyState();
+      if (completedTurn && pagedHistory && followLatest && recentOverlay.size >= 100) requestHistoryPage(0, true);
       break;
     case "models":
       clearTimeout(modelsTimer);
@@ -512,13 +553,30 @@ function handle(m) {
       renderWriterConflict();
       break;
     case "event":
-      if (m.event.kind === "user" && input.value.trim() === m.event.text) { input.value = ""; input.style.height = "auto"; updateComposer(); }
+      if (pendingSelection || (m.event.threadId && m.event.threadId !== appState.threadId)) break;
+      if (m.event.kind === "user" && (input.value.trim() === m.event.text || (m.event.truncated && input.value.trim().length === m.event.textLength && input.value.trim().startsWith(m.event.text)))) { input.value = ""; input.style.height = "auto"; updateComposer(); }
       renderEvent(m.event);
       scrollFeed();
       break;
     case "assistantDelta":
+      if (pendingSelection || (m.threadId && m.threadId !== appState.threadId)) break;
       appendAssistant(m.text, m.itemId);
       break;
+    case "historyPage":
+      if (!pageRequest || pageRequest.requestId !== m.requestId || m.threadId !== appState.threadId) break;
+      receiveHistoryPage(m);
+      break;
+    case "historyItem": {
+      const request = itemRequests.get(m.requestId);
+      if (!request || m.threadId !== appState.threadId) break;
+      clearTimeout(request.timer); itemRequests.delete(m.requestId);
+      const event = historyFeed.events.find(e => e.id === request.eventId);
+      if (event) {
+        const updated = { ...event, text: m.text, textOffset: m.offset, textLength: m.textLength, truncated: true };
+        replaceCachedEvent(updated); historyFeed.upsert(updated);
+      }
+      break;
+    }
     case "approval":
       renderApproval(m.approval);
       notifyApproval(m.approval);
@@ -527,6 +585,19 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (m.requestId?.startsWith(historyClientId + "-select-") && m.requestId !== lastSelectionId) break;
+      if (m.requestId?.startsWith(historyClientId + "-page-") && m.requestId !== pageRequest?.requestId) break;
+      if (m.requestId?.startsWith(historyClientId + "-item-") && !itemRequests.has(m.requestId)) break;
+      if (pageRequest?.requestId === m.requestId) {
+        clearTimeout(pageTimer); pageRequest = null; updateHistoryControls(m.message); break;
+      }
+      if (itemRequests.has(m.requestId)) {
+        clearTimeout(itemRequests.get(m.requestId).timer); itemRequests.delete(m.requestId);
+        $("historyStatus").textContent = m.message; break;
+      }
+      if (pendingSelection?.requestId === m.requestId) {
+        clearTimeout(selectionTimer); pendingSelection = null; updateComposer(); updateHistoryControls(m.message); break;
+      }
       if (writerPending && writerPending === m.requestId) {
         clearTimeout(writerTimer); writerPending = null;
         $("writerStatus").textContent = m.message;
@@ -581,6 +652,101 @@ function applyState() {
 // ---------------------------------------------------------------------------
 // Feed rendering
 // ---------------------------------------------------------------------------
+function selectHistoryThread(threadId) {
+  const requestId = historyClientId + "-select-" + newClientId();
+  if (!sendWs({ type: "readThread", threadId, historyMode: "paged", requestId })) return;
+  clearTimeout(pageTimer); pageRequest = null;
+  clearTimeout(selectionTimer);
+  pendingSelection = { requestId, threadId }; lastSelectionId = requestId;
+  updateHistoryControls(); updateComposer();
+  $("sessionsSheet").classList.add("hidden");
+  selectionTimer = setTimeout(() => { pendingSelection = null; updateComposer(); updateHistoryControls("会话加载超时"); }, 20000);
+}
+
+function updateHistoryControls(message = "") {
+  $("historyOlder").classList.toggle("hidden", !pagedHistory || !historyPages[oldestPage]?.nextCursor);
+  $("historyNewer").classList.toggle("hidden", !pagedHistory || newestPage === 0);
+  $("historyOlder").disabled = $("historyNewer").disabled = !!pageRequest || !!pendingSelection;
+  $("historyStatus").textContent = message || (pendingSelection || pageRequest ? "加载中…" : "");
+  $("historyToolbar").classList.toggle("hidden", !message && !pendingSelection && !pageRequest && (!pagedHistory || (!historyPages[oldestPage]?.nextCursor && newestPage === 0)));
+  $("scrollBottom").classList.toggle("hidden", followLatest && newestPage === 0);
+  $("feed").setAttribute("aria-busy", String(!!pageRequest || !!pendingSelection));
+}
+
+function requestHistoryPage(index, reset = false) {
+  if (pageRequest || pendingSelection || !appState.threadId) return;
+  if (!reset && pageCache.has(index)) return;
+  const cursor = index === 0 ? null : historyPages[index]?.cursor;
+  if (index !== 0 && !cursor) { requestHistoryPage(0, true); return; }
+  const requestId = historyClientId + "-page-" + newClientId();
+  if (!sendWs({ type: "historyPage", threadId: appState.threadId, cursor, requestId })) return;
+  pageRequest = { index, cursor, requestId, reset }; updateHistoryControls();
+  pageTimer = setTimeout(() => { pageRequest = null; updateHistoryControls("历史加载超时，请重试"); }, 20000);
+}
+
+function receiveHistoryPage(m) {
+  const request = pageRequest;
+  clearTimeout(pageTimer); pageRequest = null;
+  if (request.reset) { pageCache.clear(); historyPages = []; }
+  historyPages[request.index] = { cursor: request.cursor, nextCursor: m.nextCursor };
+  if (m.nextCursor) historyPages[request.index + 1] = { ...historyPages[request.index + 1], cursor: m.nextCursor };
+  pageCache.set(request.index, m.events || []);
+  while (pageCache.size > 3) {
+    const farthest = [...pageCache.keys()].sort((a,b) => Math.abs(b - request.index) - Math.abs(a - request.index))[0];
+    pageCache.delete(farthest);
+  }
+  // Only cursors survive eviction; very old navigation metadata is bounded too.
+  for (const key of Object.keys(historyPages)) if (Math.abs(Number(key) - request.index) > 256) delete historyPages[key];
+  newestPage = Math.min(...pageCache.keys()); oldestPage = Math.max(...pageCache.keys());
+  followLatest = request.reset;
+  showCachedHistory(request.reset); updateHistoryControls();
+}
+
+function showCachedHistory(bottom = followLatest) {
+  const events = [...pageCache.keys()].sort((a,b) => b - a).flatMap(index => pageCache.get(index));
+  if (newestPage === 0) events.push(...recentOverlay.values());
+  historyFeed.replace(events, bottom);
+}
+
+function replaceCachedEvent(event) {
+  for (const events of pageCache.values()) {
+    const index = events.findIndex(e => e.id === event.id);
+    if (index >= 0) events[index] = event;
+  }
+  if (recentOverlay.has(event.id)) recentOverlay.set(event.id, event);
+}
+
+function loadOlderHistory() {
+  const cursor = historyPages[oldestPage]?.nextCursor;
+  if (!cursor) return;
+  historyPages[oldestPage + 1] = { cursor };
+  requestHistoryPage(oldestPage + 1);
+}
+$("historyOlder").onclick = loadOlderHistory;
+$("historyNewer").onclick = () => requestHistoryPage(Math.max(0, newestPage - 1));
+
+function addContentNavigation(div, e) {
+  const nav = document.createElement("div"); nav.className = "history-content-nav";
+  const offset = e.textOffset || 0;
+  const label = document.createElement("span");
+  label.textContent = "内容 " + (offset + 1) + "–" + (offset + (e.text || "").length) + " / " + e.textLength;
+  nav.append(label);
+  for (const [next, icon, title] of [[Math.max(0, offset - 8192), "chevron-up", "上一段内容"], [offset + (e.text || "").length, "chevron-down", "下一段内容"]]) {
+    const button = document.createElement("button"); button.className = "icon-btn"; button.title = title; button.setAttribute("aria-label", title);
+    const symbol = document.createElement("i"); symbol.dataset.lucide = icon; button.append(symbol);
+    button.disabled = !!e.live || !e.detailCursor || next === offset || next >= e.textLength || [...itemRequests.values()].some(r => r.eventId === e.id);
+    button.onclick = () => {
+      const requestId = historyClientId + "-item-" + newClientId();
+      if (!sendWs({ type: "readHistoryItem", threadId: appState.threadId, detailCursor: e.detailCursor, offset: next, requestId })) return;
+      button.disabled = true;
+      const timer = setTimeout(() => { itemRequests.delete(requestId); historyFeed.upsert({ ...e }); updateHistoryControls("内容加载超时，请重试"); }, 20000);
+      itemRequests.set(requestId, { eventId: e.id, timer });
+    };
+    nav.append(button);
+  }
+  div.append(nav); window.ChatUI.icons(nav);
+}
+
 function cls(kind) {
   if (kind === "user") return "user";
   if (kind === "item:agentMessage") return "assistant";
@@ -600,32 +766,24 @@ function labelFor(kind) {
 
 function setEventText(div, e) {
   const body = div.querySelector(".body");
-  div.dataset.text = e.text || "";
+  div._event = e;
   if (body) {
     if (div.classList.contains("assistant")) {
       body.classList.add("markdown");
-      body.innerHTML = window.ChatUI.markdown(e.text || "");
+      if (e.live) body.textContent = e.text || "";
+      else body.innerHTML = window.ChatUI.markdown(e.text || "");
       body.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
     } else body.textContent = e.text || "";
   }
   const summary = div.querySelector("summary");
   if (summary) { summary.textContent = (e.text || "").split("\n")[0]; summary.title = summary.textContent; }
+  div.querySelector(".history-content-nav")?.remove();
+  if (e.truncated) addContentNavigation(div, e);
+  const copy = div.querySelector(".message-actions button");
+  if (copy) { copy.title = e.truncated ? "复制当前段" : "复制回复"; copy.setAttribute("aria-label", copy.title); }
 }
 
-function renderEvent(e) {
-  const existing = e.id && eventRows.get(e.id);
-  if (existing) {
-    setEventText(existing, e);
-    if (existing === liveAssistant && !e.live) liveAssistant = null;
-    return;
-  }
-  if (e.kind === "item:agentMessage" && liveAssistant && (!e.itemId || liveAssistant.dataset.itemId === e.itemId)) {
-    setEventText(liveAssistant, e);
-    liveAssistant.dataset.eventId = e.id || "";
-    if (e.id) eventRows.set(e.id, liveAssistant);
-    liveAssistant = null;
-    return;
-  }
+function createEventRow(e) {
   const div = document.createElement("div");
   div.className = "entry " + cls(e.kind);
   div.dataset.eventId = e.id || "";
@@ -634,58 +792,65 @@ function renderEvent(e) {
   const collapsible = e.kind?.startsWith("item:") && !["item:agentMessage", "item:plan"].includes(e.kind) && (e.text || "").includes("\n");
   div.innerHTML = (lab ? '<div class="label">' + lab + '</div>' : "") + (collapsible ? '<details><summary></summary><div class="body"></div></details>' : '<div class="body"></div>');
   setEventText(div, e);
-  $("feed").appendChild(div);
   if (cls(e.kind) === "assistant") addMessageActions(div);
-  $("emptyState").classList.add("hidden");
-  if (e.id) eventRows.set(e.id, div);
-  if (e.live) liveAssistant = div;
+  return div;
+}
+
+function renderEvent(e) {
+  e = { ...e, id: e.id || newClientId() };
+  const previous = historyFeed.events.find(event => event.live && e.kind === "item:agentMessage" && (!e.itemId || event.itemId === e.itemId));
+  if (previous && previous.id !== e.id) {
+    historyFeed.events = historyFeed.events.filter(event => event.id !== previous.id);
+    recentOverlay.delete(previous.id);
+  }
+  if (!e.live && liveAssistant && (!e.itemId || liveAssistant.itemId === e.itemId)) liveAssistant = null;
+  replaceCachedEvent(e);
+  if (pagedHistory) {
+    recentOverlay.set(e.id, e);
+    if (recentOverlay.size > 100) recentOverlay.delete(recentOverlay.keys().next().value);
+    if (newestPage !== 0) return;
+    showCachedHistory();
+  } else historyFeed.upsert(e);
 }
 
 function appendAssistant(text, itemId) {
-  if (liveAssistant && itemId && liveAssistant.dataset.itemId !== itemId) liveAssistant = null;
-  if (!liveAssistant) {
-    const div = document.createElement("div");
-    div.className = "entry assistant";
-    div.dataset.itemId = itemId || "";
-    div.innerHTML = `<div class="label">Codex</div><div class="body"></div>`;
-    $("feed").appendChild(div);
-    liveAssistant = div;
-    addMessageActions(div);
-    $("emptyState").classList.add("hidden");
-  }
-  liveAssistant.dataset.text = (liveAssistant.dataset.text || "") + text;
-  if (!deltaFrame) deltaFrame = requestAnimationFrame(() => {
-    deltaFrame = null;
-    if (liveAssistant) setEventText(liveAssistant, { text: liveAssistant.dataset.text });
-    scrollFeed();
-  });
+  if (liveAssistant && itemId && liveAssistant.itemId !== itemId) liveAssistant = null;
+  if (!liveAssistant) liveAssistant = historyFeed.events.find(e => e.live && (!itemId || e.itemId === itemId)) || { id: "live-" + (itemId || newClientId()), kind: "item:agentMessage", itemId, text: "", live: true };
+  const length = (liveAssistant.textLength ?? liveAssistant.text.length) + text.length;
+  liveAssistant = { ...liveAssistant, text: (liveAssistant.text + text).slice(0, pagedHistory ? 8192 : undefined), textLength: length, truncated: pagedHistory && length > 8192 };
+  renderEvent(liveAssistant);
+  scrollFeed();
 }
 
 function scrollFeed(force = false) {
   const f = $("feed");
-  if (followLatest || force) { f.scrollTop = f.scrollHeight; followLatest = true; }
-  $("scrollBottom").classList.toggle("hidden", followLatest);
-  $("emptyState").classList.toggle("hidden", f.childElementCount > 0);
+  historyFeed.follow = followLatest || force;
+  if (followLatest || force) { f.scrollTop = f.scrollHeight; followLatest = true; historyFeed.schedule(); }
+  $("scrollBottom").classList.toggle("hidden", followLatest && newestPage === 0);
+  $("emptyState").classList.toggle("hidden", historyFeed.events.length > 0);
 }
 
 function addMessageActions(div) {
   const actions = document.createElement("div"); actions.className = "message-actions";
-  const copy = document.createElement("button"); copy.className = "icon-btn"; copy.title = "复制回复"; copy.setAttribute("aria-label", "复制回复");
+  const copy = document.createElement("button"); copy.className = "icon-btn"; copy.title = div._event?.truncated ? "复制当前段" : "复制回复"; copy.setAttribute("aria-label", copy.title);
   copy.innerHTML = '<i data-lucide="copy"></i>';
   copy.onclick = async () => {
     try {
-      await navigator.clipboard.writeText(div.dataset.text || "");
+      await navigator.clipboard.writeText(div._event?.text || "");
       copy.innerHTML = '<i data-lucide="check"></i>'; window.ChatUI.icons(copy); copy.title = "已复制";
-      setTimeout(() => { copy.innerHTML = '<i data-lucide="copy"></i>'; window.ChatUI.icons(copy); copy.title = "复制回复"; }, 1800);
+      setTimeout(() => { copy.innerHTML = '<i data-lucide="copy"></i>'; window.ChatUI.icons(copy); copy.title = div._event?.truncated ? "复制当前段" : "复制回复"; }, 1800);
     } catch { copy.title = "复制失败，请选择文字复制"; }
   };
   actions.append(copy); div.append(actions); window.ChatUI.icons(actions);
 }
 $("feed").addEventListener("scroll", () => {
-  const f = $("feed"); followLatest = f.scrollHeight - f.scrollTop - f.clientHeight < 80;
-  $("scrollBottom").classList.toggle("hidden", followLatest);
+  // Near-bottom tracking would undo small upward wheel/touch movements.
+  const f = $("feed"); followLatest = f.scrollHeight - f.scrollTop - f.clientHeight <= 1;
+  historyFeed.follow = followLatest;
+  if (pagedHistory && !pageRequest && !pendingSelection && f.scrollTop < 60 && historyFeed.events.length) loadOlderHistory();
+  $("scrollBottom").classList.toggle("hidden", followLatest && newestPage === 0);
 }, { passive: true });
-$("scrollBottom").onclick = () => scrollFeed(true);
+$("scrollBottom").onclick = () => { if (pagedHistory && (newestPage > 0 || recentOverlay.size >= 100)) requestHistoryPage(0, true); else scrollFeed(true); };
 
 // ---------------------------------------------------------------------------
 // Approvals
@@ -752,7 +917,7 @@ const input = $("input");
 function updateComposer() {
   const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN && appState.codexConnected) && (profile.mode !== "cloud" || (!!agentPub && paired));
   const blocked = appState.status === "running" && !$("steerMode").checked;
-  $("sendBtn").disabled = !connected || !$("input").value.trim() || blocked;
+  $("sendBtn").disabled = !connected || !$("input").value.trim() || blocked || !!pendingSelection;
   $("quickNewThread").disabled = $("sidebarNewThread").disabled = appState.status === "running" || !connected;
 }
 input.addEventListener("input", () => {
@@ -949,7 +1114,7 @@ function sessionItem(t) {
     `<div class="s-name">${escapeHtml(t.name || "(无标题)")}</div>` +
     `<div class="s-meta">${escapeHtml(when)}</div>`;
   item.onclick = () => {
-    if (sendWs({ type: "readThread", threadId: t.id })) $("sessionsSheet").classList.add("hidden");
+    selectHistoryThread(t.id);
   };
   return item;
 }

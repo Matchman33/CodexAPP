@@ -113,6 +113,11 @@
     </div>
 
     <div class="conversation">
+      <div id="historyToolbar" class="history-toolbar hidden">
+        <button id="historyOlder" class="icon-btn hidden" title="更早的消息" aria-label="更早的消息"><i data-lucide="chevron-up"></i></button>
+        <span id="historyStatus" role="status"></span>
+        <button id="historyNewer" class="icon-btn hidden" title="较新的消息" aria-label="较新的消息"><i data-lucide="chevron-down"></i></button>
+      </div>
       <div id="emptyState" class="empty-state"><img src="icon-180.png" alt="" width="48" height="48" /><h1>有什么可以帮忙的？</h1></div>
       <main id="feed" class="feed" aria-label="对话内容"></main>
       <button id="scrollBottom" class="icon-btn scroll-bottom hidden" aria-label="回到最新消息" title="回到最新消息"><i data-lucide="arrow-down"></i></button>
@@ -231,6 +236,7 @@
   <script src="vendor/nacl.js"></script>
   <script src="e2e.js"></script>
   <script src="vendor/chat-ui.js"></script>
+  <script src="history-feed.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

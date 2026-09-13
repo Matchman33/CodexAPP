@@ -18,7 +18,9 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello` | `state`, `config`, `pendingApprovals[]`, `recentEvents[]` | 连接快照 |
+| `hello` | `state`, `config`, `pendingApprovals[]`, `recentEvents[]`, `history?`, `requestId?` | 连接快照；分页模式仅携带有限近期记录 |
+| `historyPage` | `threadId`, `events[]`, `nextCursor`, `requestId` | 按时间正序排列的一页历史；游标继续读取更早记录 |
+| `historyItem` | `threadId`, `itemId?`, `text`, `offset`, `textLength`, `nextOffset`, `detailCursor`, `requestId` | 历史长文本的一个内容片段 |
 | `state` | `state` | 状态变化 |
 | `models` | `models[]`, `defaultModel`, `defaultReasoningEffort`, `error` | 响应 `listModels`；列表可能为空或部分加载失败 |
 | `configSaved` | `requestId?` | `setConfig` 已应用，模型与思考等级已保存到电脑端配置 |
@@ -93,7 +95,9 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `listModels` | `cwd?` | 从电脑端 Codex 获取模型列表与该目录的默认模型 |
 | `getState` | — | 请求重新下发快照 |
 | `listThreads` | — | 请求会话/项目列表，服务端回 `projectTree` |
-| `readThread` | `threadId` | 只读查看完整历史，不获取写入锁；回 `hello` |
+| `readThread` | `threadId`, `historyMode?`, `requestId?` | 只读查看会话，不获取写入锁；`historyMode:"paged"` 返回近期一页，回 `hello` |
+| `historyPage` | `threadId`, `cursor?`, `requestId` | 只读获取历史页；省略游标获取最新页，回 `historyPage` |
+| `readHistoryItem` | `threadId`, `detailCursor`, `offset?`, `requestId` | 分段读取超长消息或工具输出，回 `historyItem` |
 | `resumeThread` | `threadId` | 接续已有会话（切到它的项目 cwd，继续这段对话） |
 | `inspectWriter` | `threadId`, `requestId?` | 只读检查该会话锁的占用进程，返回 `writerConflict` |
 | `takeoverThread` | `threadId`, `token`, `confirmed:true`, `requestId?` | 确认后结束已识别占用进程，确认退出后尝试接续会话 |
@@ -102,7 +106,21 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 列表读取所有模型提供商的非归档交互会话，遍历分页并按会话 ID 去重。新版项目 ID 由 `local-projects` 解析，显式 `thread-project-assignments` 优先于路径匹配，兼容旧版目录格式、多个工作根目录和工作区提示。未分配的会话保留在对话组，不再静默丢弃。
 
-打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。历史来自 Codex 的只读历史接口；完整历史快照不再限制为最后 120 条，客户端也不再截断为 300 条。包含文本、附件路径、计划、推理摘要和工具结果，图片本体暂不通过中继传输。事件可以附带 `itemId`、`threadId`、`turnId`、`phase`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
+打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。新版网页启用下方的历史分页模式；未传 `historyMode` 的旧客户端保留完整历史读取兼容路径。历史包含文本、附件路径、计划、推理摘要和工具结果，图片本体暂不通过中继传输。事件可附带 `itemId`、`threadId`、`turnId`、`phase`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
+
+### 历史分页与缓存
+
+新版网页直连时在 WebSocket 地址增加 `history=paged`；云端通过 `getState` 的 `historyMode:"paged"` 启用。打开和新建会话也传递该模式。分页快照的 `history` 为 `{ paged:true, nextCursor:string|null }`；旧客户端未声明模式时仍可通过原 `readThread` 读取完整历史，但不享受后端有界缓存优化。
+
+- 首次读取会话元数据时不包含完整轮次；每页最多 50 个事件、65536 个文本字符，每个事件预览最多 8192 个字符。字符数按 JavaScript UTF-16 字符串长度计算，不等于网络字节数。
+- `events[]` 为正序；客户端用 `nextCursor` 请求更早页，再前置到当前消息。游标绑定会话并签名，重启服务后失效；错误时重新打开会话，不伪造游标。
+- `truncated:true` 表示当前仅为预览或片段，`textLength` 为完整文本长度，`detailCursor` 用于读取余下内容。工具输出、消息及超长轮次错误均可分段查看。实时消息尚未持久化时内容读取可能失败，需完成后刷新历史。
+- 中继在分页模式只保留最多 100 条近期事件；网页只保留 3 页历史及最多 100 条近期更新，DOM 最多创建 60 条邻近可视消息。旧页内容淘汰后通过保留的游标重新读取，不删除 Codex 历史。
+- 网页滚到顶部读取更早页；回读较新页或回到最新消息时重新取回已淘汰内容。仅保留附近的导航游标，超出缓存的导航位置回到最新页后可重新向前浏览。
+- 历史及内容响应回传 `requestId` 和 `threadId`；客户端忽略迟到或不匹配的结果。历史分页不进入任务控制队列，不等待分页完成才处理审批或停止。
+- 浏览历史的页数不改变 Codex 模型上下文。接续仍由 Codex 加载自己的完整上下文，并保留运行中 `turnId`；不是把模型历史截断到 50 条。
+
+接口适配依次使用 `thread/items/list`、旧版 `thread/turns/items/list`。若二者都未实现，则降级为 `thread/turns/list` 一次读取一轮完整条目，再生成有限显示页。此降级仍避免一次传输全部会话，但单轮巨量输出的读取开销及 Codex 内部读盘行为不能由网页分页彻底消除。不支持轮次分页时返回错误，不偷偷改用写入接续读取历史。
 
 ### 模型设置
 

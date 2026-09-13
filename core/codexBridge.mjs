@@ -17,6 +17,7 @@ import os from "node:os";
 import { ModelSettings } from "./modelSettings.mjs";
 import { WriterControl, isWriterConflict } from "./writerControl.mjs";
 import { listProjectTree, readThreadHistory, historyEvents, itemToEvent } from "./threadDisplay.mjs";
+import { HistoryPager, trimRecent, boundEvent } from "./historyPaging.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
@@ -200,6 +201,8 @@ export class CodexBridge {
     this.pendingApprovals = new Map();
     this.commandQueue = Promise.resolve();
     this.codex = new CodexClient(config.codexBin);
+    this.historyPager = new HistoryPager(this.codex);
+    this.history = null;
     this.models = new ModelSettings(this.codex, config, saveModel);
     this.writers = new WriterControl({ protectedPids: () => [process.pid, this.codex.child?.pid] });
     this.codex.onNotification = (m) => this._onNotification(m);
@@ -234,7 +237,7 @@ export class CodexBridge {
   async _bootstrap() {
     const res = await this.codex.request("initialize", {
       clientInfo: { name: this.config.originator || "codex_vscode", title: "CodexApp Agent", version: "0.1.0" },
-      capabilities: null,
+      capabilities: { experimentalApi: true },
     });
     this.codex.notify("initialized");
     this.state.codexConnected = true;
@@ -244,10 +247,12 @@ export class CodexBridge {
 
   // ---- outbound helpers ----
   _pushEvent(entry) {
-    const e = { id: crypto.randomUUID(), ts: Date.now(), ...entry };
+    const raw = { id: crypto.randomUUID(), ts: Date.now(), threadId: this.state.threadId, ...entry };
+    const e = this.history ? boundEvent(raw, this.historyPager) : raw;
     const index = this.eventLog.findIndex((old) => old.id === e.id);
     if (index < 0) this.eventLog.push(e);
     else this.eventLog[index] = e;
+    if (this.history) trimRecent(this.eventLog);
     this.emit({ type: "event", event: e });
     return e;
   }
@@ -260,6 +265,7 @@ export class CodexBridge {
       config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd, model: this.state.model, reasoningEffort: this.state.reasoningEffort },
       pendingApprovals: [...this.pendingApprovals.values()].map((v) => v.approval),
       recentEvents: this.eventLog,
+      history: this.history,
       diff: this.state.lastDiff,
     };
   }
@@ -322,8 +328,10 @@ export class CodexBridge {
         const id = [st.threadId, params.turnId || st.turnId, params.itemId].join(":");
         const index = this.eventLog.findIndex((e) => e.id === id);
         const previous = index < 0 ? null : this.eventLog[index];
-        const event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, text: (previous?.text || "") + params.delta, live: true };
+        let event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, threadId: st.threadId, turnId: params.turnId || st.turnId, text: (previous?.text || "") + params.delta, textLength: (previous?.textLength ?? previous?.text?.length ?? 0) + params.delta.length, live: true };
+        if (this.history) event = boundEvent(event, this.historyPager);
         if (index < 0) this.eventLog.push(event); else this.eventLog[index] = event;
+        if (this.history) trimRecent(this.eventLog);
         this.emit({ type: "assistantDelta", text: params.delta, itemId: params.itemId, turnId: params.turnId, threadId: params.threadId });
         break;
       }
@@ -375,6 +383,7 @@ export class CodexBridge {
   }
 
   dispatch(m) {
+    if (m.type === "historyPage" || m.type === "readHistoryItem") return this._dispatchCommand(m);
     const task = this.commandQueue.catch(() => {}).then(() => this._dispatchCommand(m));
     this.commandQueue = task;
     return task;
@@ -386,9 +395,13 @@ export class CodexBridge {
       case "steer": return this._steer(String(m.text || "").trim());
       case "interrupt": return this._interrupt(m.threadId, m.turnId);
       case "approval": return this._resolveApproval(m.key, m.optionId);
-      case "newThread": return this._newThread(m.cwd);
+      case "newThread": return this._newThread(m.cwd, m.historyMode === "paged" || !!this.history);
       case "listThreads": return this._listThreads();
-      case "readThread": return this._readThread(m.threadId);
+      case "readThread": return this._readThread(m.threadId, m.historyMode === "paged", m.requestId);
+      case "historyPage":
+        return this.emit({ type: "historyPage", ...(await this.historyPager.page(m.threadId, m.cursor)), requestId: m.requestId });
+      case "readHistoryItem":
+        return this.emit({ type: "historyItem", ...(await this.historyPager.item(m.threadId, m.detailCursor, m.offset)), requestId: m.requestId });
       case "resumeThread": return this._resumeThread(m.threadId);
       case "inspectWriter": return this.emit(await this.writers.inspect(m.threadId));
       case "takeoverThread":
@@ -406,7 +419,12 @@ export class CodexBridge {
         this._broadcastState();
         this.emit({ type: "configSaved", requestId: m.requestId });
         return;
-      case "getState": return this.emit(this.snapshot());
+      case "getState":
+        if (m.historyMode === "paged") {
+          this.history ||= { paged: true, nextCursor: null };
+          this.eventLog = this.eventLog.map(e => boundEvent(e, this.historyPager)); trimRecent(this.eventLog);
+        }
+        return this.emit(this.snapshot());
       default: return;
     }
   }
@@ -448,13 +466,14 @@ export class CodexBridge {
     this._pushEvent({ kind: "approval-resolved", text: `${item.approval.title}: ${optionId === "deny" ? "已拒绝" : "已批准"}` });
     this.emit({ type: "approvalResolved", key, by: "user" });
   }
-  async _newThread(cwd) {
+  async _newThread(cwd, paged = false) {
     if (this.state.status === "running") throw new Error("请先停止当前任务再新建会话");
     this.state.threadId = null; this.state.turnId = null; this.state.status = "idle";
     this.state.threadName = null; this.state.lastDiff = ""; this.state.readOnly = false;
     this.state.effectiveReasoningEffort = null;
     this.state.effectiveModel = null;
     this.eventLog = [];
+    this.history = paged ? { paged: true, nextCursor: null } : null;
     this.emit(this.snapshot());
     if (cwd) this.state.cwd = cwd;
     await this._ensureThread(cwd);
@@ -463,9 +482,10 @@ export class CodexBridge {
   async _listThreads() {
     this.emit({ type: "projectTree", ...await listProjectTree(this.codex, CODEX_HOME) });
   }
-  async _readThread(threadId) {
+  async _readThread(threadId, paged = false, requestId) {
     if (this.state.status === "running") throw new Error("请先停止当前任务再切换会话");
-    const t = await readThreadHistory(this.codex, threadId);
+    const page = paged ? await this.historyPager.open(threadId) : null;
+    const t = page?.thread || await readThreadHistory(this.codex, threadId);
     this.state.threadId = t.id;
     this.state.cwd = t.cwd || this.state.cwd;
     this.state.threadName = t.name || t.preview || null;
@@ -475,14 +495,15 @@ export class CodexBridge {
     this.state.effectiveModel = null;
     this.state.effectiveReasoningEffort = null;
     this.state.lastDiff = "";
-    this.eventLog = historyEvents(t);
-    this.emit(this.snapshot());
+    this.eventLog = page?.events || historyEvents(t);
+    this.history = page ? { paged: true, nextCursor: page.nextCursor } : null;
+    this.emit({ ...this.snapshot(), requestId });
   }
   async _resumeThread(threadId) {
     if (this.state.status === "running" && this.state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
     let res;
     try {
-      res = await this.codex.request("thread/resume", { threadId, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox });
+      res = await this.codex.request("thread/resume", { threadId, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, ...(this.history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
     } catch (error) {
       if (!isWriterConflict(error)) throw error;
       this.emit(await this.writers.inspect(threadId));
@@ -491,7 +512,7 @@ export class CodexBridge {
     const t = res?.thread || {};
     this.state.threadId = t.id || threadId;
     this.state.cwd = t.cwd || this.state.cwd;
-    const activeTurn = (t.turns || []).findLast((turn) => turn.status === "inProgress");
+    const activeTurn = (res.initialTurnsPage?.data || t.turns || []).findLast((turn) => turn.status === "inProgress");
     this.state.turnId = activeTurn?.id || null;
     this.state.status = activeTurn ? "running" : "idle";
     this.state.lastDiff = "";
@@ -499,8 +520,19 @@ export class CodexBridge {
     this.state.effectiveModel = res?.model || null;
     this.state.effectiveReasoningEffort = res?.reasoningEffort || null;
     this.state.readOnly = false;
-    const history = await readThreadHistory(this.codex, this.state.threadId, t);
-    this.eventLog = historyEvents(history);
+    const beforePage = new Map(this.eventLog.map(e => [e.id, e]));
+    const page = this.history ? await this.historyPager.page(this.state.threadId) : null;
+    if (page) {
+      const changes = this.eventLog.filter(e => (e.live && e.threadId === this.state.threadId) || beforePage.get(e.id) !== e);
+      this.eventLog = [...new Map([...page.events, ...changes].map(e => [e.id, e])).values()];
+      trimRecent(this.eventLog);
+      const pagedActive = page.turns.find(t => t.status === "inProgress");
+      if (!activeTurn && pagedActive && !changes.some(e => e.kind === "turn")) { this.state.turnId = pagedActive.id; this.state.status = "running"; }
+      this.history = { paged: true, nextCursor: page.nextCursor };
+    } else {
+      const history = await readThreadHistory(this.codex, this.state.threadId, t);
+      this.eventLog = historyEvents(history);
+    }
     this.emit(this.snapshot());
     return true;
   }

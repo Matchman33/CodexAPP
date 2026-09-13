@@ -18,6 +18,7 @@ import { resolveCodexBin } from "../core/codexBridge.mjs";
 import { ModelSettings, persistModel } from "../core/modelSettings.mjs";
 import { WriterControl, isWriterConflict } from "../core/writerControl.mjs";
 import { listProjectTree, readThreadHistory, historyEvents, itemToEvent } from "../core/threadDisplay.mjs";
+import { HistoryPager, trimRecent, boundEvent } from "../core/historyPaging.mjs";
 import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -99,14 +100,17 @@ const state = {
   readOnly: false,
   lastDiff: "", // latest unified diff for the current turn
 };
-const eventLog = []; // Complete normalized history for the displayed conversation.
+const eventLog = []; // Bounded recent window in paged mode; legacy clients retain full snapshots.
+let history = null;
 const pendingApprovals = new Map(); // key -> { serverReqId, method, approval }
 
 function pushEvent(entry) {
-  const e = { id: crypto.randomUUID(), ts: Date.now(), ...entry };
+  const raw = { id: crypto.randomUUID(), ts: Date.now(), threadId: state.threadId, ...entry };
+  const e = history ? boundEvent(raw, historyPager) : raw;
   const index = eventLog.findIndex((old) => old.id === e.id);
   if (index < 0) eventLog.push(e);
   else eventLog[index] = e;
+  if (history) trimRecent(eventLog);
   broadcast({ type: "event", event: e });
   return e;
 }
@@ -224,6 +228,7 @@ class CodexClient {
 }
 
 const codex = new CodexClient(config.codexBin);
+const historyPager = new HistoryPager(codex);
 const models = new ModelSettings(codex, config, (model, settings) => persistModel(CONFIG_PATH, model, settings));
 const writers = new WriterControl({ protectedPids: () => [process.pid, codex.child?.pid] });
 
@@ -405,8 +410,10 @@ function handleNotification(msg) {
       const id = [state.threadId, params.turnId || state.turnId, params.itemId].join(":");
       const index = eventLog.findIndex((e) => e.id === id);
       const previous = index < 0 ? null : eventLog[index];
-      const event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, text: (previous?.text || "") + params.delta, live: true };
+      let event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, threadId: state.threadId, turnId: params.turnId || state.turnId, text: (previous?.text || "") + params.delta, textLength: (previous?.textLength ?? previous?.text?.length ?? 0) + params.delta.length, live: true };
+      if (history) event = boundEvent(event, historyPager);
       if (index < 0) eventLog.push(event); else eventLog[index] = event;
+      if (history) trimRecent(eventLog);
       broadcast({ type: "assistantDelta", text: params.delta, itemId: params.itemId, turnId: params.turnId, threadId: params.threadId });
       break;
     }
@@ -459,7 +466,7 @@ codex.onNotification = handleNotification;
 async function bootstrapCodex() {
   const res = await codex.request("initialize", {
     clientInfo: { name: config.originator || "codex_vscode", title: "CodexApp Relay", version: "0.1.0" },
-    capabilities: null,
+    capabilities: { experimentalApi: true },
   });
   codex.notify("initialized");
   state.codexConnected = true;
@@ -551,7 +558,7 @@ async function resolveApproval(key, optionId) {
   broadcast({ type: "approvalResolved", key, by: "user" });
 }
 
-async function newThread(cwd) {
+async function newThread(cwd, paged = false) {
   if (state.status === "running") throw new Error("请先停止当前任务再新建会话");
   state.threadId = null;
   state.turnId = null;
@@ -562,6 +569,7 @@ async function newThread(cwd) {
   state.effectiveModel = null;
   state.lastDiff = "";
   eventLog.length = 0;
+  history = paged ? { paged: true, nextCursor: null } : null;
   broadcast(snapshot());
   if (cwd) state.cwd = cwd;
   await ensureThread(cwd);
@@ -572,9 +580,10 @@ async function buildProjectTree() {
   return listProjectTree(codex, CODEX_HOME);
 }
 
-async function readThread(threadId) {
+async function readThread(threadId, paged = false, requestId) {
   if (state.status === "running") throw new Error("请先停止当前任务再切换会话");
-  const t = await readThreadHistory(codex, threadId);
+  const page = paged ? await historyPager.open(threadId) : null;
+  const t = page?.thread || await readThreadHistory(codex, threadId);
   state.threadId = t.id;
   state.cwd = t.cwd || state.cwd;
   state.threadName = t.name || t.preview || null;
@@ -584,17 +593,17 @@ async function readThread(threadId) {
   state.effectiveModel = null;
   state.effectiveReasoningEffort = null;
   state.lastDiff = "";
-  eventLog.splice(0, eventLog.length, ...historyEvents(t));
-  broadcast(snapshot());
+  eventLog.splice(0, eventLog.length, ...(page?.events || historyEvents(t)));
+  history = page ? { paged: true, nextCursor: page.nextCursor } : null;
+  broadcast({ ...snapshot(), requestId });
 }
 
-// Resume an existing conversation AND load its history so clients show the
-// same messages Codex shows. Rebuilds the feed from thread.turns[].items[].
+// Resume with recent display history; model context remains owned by Codex.
 async function resumeThread(threadId) {
   if (state.status === "running" && state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
   let res;
   try {
-    res = await codex.request("thread/resume", { threadId, approvalPolicy: state.approvalPolicy, sandbox: state.sandbox });
+    res = await codex.request("thread/resume", { threadId, approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, ...(history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
   } catch (error) {
     if (!isWriterConflict(error)) throw error;
     return writers.inspect(threadId);
@@ -602,7 +611,7 @@ async function resumeThread(threadId) {
   const t = res?.thread || {};
   state.threadId = t.id || threadId;
   state.cwd = t.cwd || state.cwd;
-  const activeTurn = (t.turns || []).findLast((turn) => turn.status === "inProgress");
+  const activeTurn = (res.initialTurnsPage?.data || t.turns || []).findLast((turn) => turn.status === "inProgress");
   state.turnId = activeTurn?.id || null;
   state.status = activeTurn ? "running" : "idle";
   state.lastDiff = "";
@@ -611,8 +620,19 @@ async function resumeThread(threadId) {
   state.effectiveReasoningEffort = res?.reasoningEffort || null;
 
   state.readOnly = false;
-  const history = await readThreadHistory(codex, state.threadId, t);
-  eventLog.splice(0, eventLog.length, ...historyEvents(history));
+  const beforePage = new Map(eventLog.map(e => [e.id, e]));
+  const page = history ? await historyPager.page(state.threadId) : null;
+  if (page) {
+    const changes = eventLog.filter(e => (e.live && e.threadId === state.threadId) || beforePage.get(e.id) !== e);
+    const merged = [...new Map([...page.events, ...changes].map(e => [e.id, e])).values()];
+    eventLog.splice(0, eventLog.length, ...merged); trimRecent(eventLog);
+    const pagedActive = page.turns.find(t => t.status === "inProgress");
+    if (!activeTurn && pagedActive && !changes.some(e => e.kind === "turn")) { state.turnId = pagedActive.id; state.status = "running"; }
+    history = { paged: true, nextCursor: page.nextCursor };
+  } else {
+    const loaded = await readThreadHistory(codex, state.threadId, t);
+    eventLog.splice(0, eventLog.length, ...historyEvents(loaded));
+  }
 
   // Push a fresh snapshot so every client repopulates its feed with the history.
   broadcast(snapshot());
@@ -679,6 +699,7 @@ function snapshot() {
     config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd, model: state.model, reasoningEffort: state.reasoningEffort },
     pendingApprovals: [...pendingApprovals.values()].map((v) => v.approval),
     recentEvents: eventLog,
+    history,
     diff: state.lastDiff,
   };
 }
@@ -692,6 +713,11 @@ wss.on("connection", (ws, req) => {
     return;
   }
   clients.add(ws);
+  if (url.searchParams.get("history") === "paged") {
+    history ||= { paged: true, nextCursor: null };
+    const bounded = eventLog.map(e => boundEvent(e, historyPager));
+    eventLog.splice(0, eventLog.length, ...bounded); trimRecent(eventLog);
+  }
   console.log(`[ws] phone connected (${clients.size} total)`);
   send(ws, snapshot());
 
@@ -700,6 +726,11 @@ wss.on("connection", (ws, req) => {
     try {
       m = JSON.parse(raw.toString());
     } catch {
+      return;
+    }
+    if (m.type === "historyPage" || m.type === "readHistoryItem") {
+      const task = m.type === "historyPage" ? historyPager.page(m.threadId, m.cursor) : historyPager.item(m.threadId, m.detailCursor, m.offset);
+      task.then(data => send(ws, { type: m.type === "historyPage" ? "historyPage" : "historyItem", ...data, requestId: m.requestId })).catch(e => send(ws, { type: "error", message: e.message, requestId: m.requestId }));
       return;
     }
     commandQueue = commandQueue.catch(() => {}).then(async () => {
@@ -718,7 +749,7 @@ wss.on("connection", (ws, req) => {
             await resolveApproval(m.key, m.optionId);
             break;
           case "newThread":
-            await newThread(m.cwd);
+            await newThread(m.cwd, m.historyMode === "paged" || !!history);
             break;
           case "listThreads": {
             const tree = await buildProjectTree();
@@ -731,7 +762,7 @@ wss.on("connection", (ws, req) => {
             break;
           }
           case "readThread":
-            await readThread(m.threadId);
+            await readThread(m.threadId, m.historyMode === "paged", m.requestId);
             break;
           case "inspectWriter":
             send(ws, await writers.inspect(m.threadId));
@@ -757,6 +788,11 @@ wss.on("connection", (ws, req) => {
             send(ws, { type: "configSaved", requestId: m.requestId });
             break;
           case "getState":
+            if (m.historyMode === "paged") {
+              history ||= { paged: true, nextCursor: null };
+              const bounded = eventLog.map(e => boundEvent(e, historyPager));
+              eventLog.splice(0, eventLog.length, ...bounded); trimRecent(eventLog);
+            }
             send(ws, snapshot());
             break;
           default:

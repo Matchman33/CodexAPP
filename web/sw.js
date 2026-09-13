@@ -1,6 +1,6 @@
 // 仅缓存应用外壳，不缓存账号接口、健康检查或聊天数据。
-const CACHE = "codexapp-v7-network-reconnect";
-const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./e2e.js", "./vendor/nacl.js", "./vendor/chat-ui.js", "./manifest.webmanifest", "./icon-180.png", "./icon-512.png"];
+const CACHE = "codexapp-v10-history-scroll";
+const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./history-feed.js", "./e2e.js", "./vendor/nacl.js", "./vendor/chat-ui.js", "./manifest.webmanifest", "./icon-180.png", "./icon-512.png"];
 const shellPaths = new Set(SHELL.map((p) => new URL(p, self.location).pathname));
 self.addEventListener("install", (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener("activate", (e) => e.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k.startsWith("codexapp-") && k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())));

@@ -1,8 +1,8 @@
-import { createIcons, Menu, SquarePen, Settings2, ChevronDown, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon } from "lucide";
+import { createIcons, Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon } from "lucide";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 
-const icons = { Menu, SquarePen, Settings2, ChevronDown, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon };
+const icons = { Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon };
 window.ChatUI = {
   icons(root = document) { createIcons({ icons, root, attrs: { "aria-hidden": "true", "stroke-width": 1.8 } }); },
   markdown(text) {
