@@ -146,6 +146,7 @@ test("restoring default explicitly overrides the previous model on an existing t
   await bridge.dispatch({ type: "setConfig", model: "custom" });
   await bridge.dispatch({ type: "prompt", text: "one" });
   await bridge.dispatch({ type: "setConfig", model: null });
+  bridge._onNotification({ method: "turn/completed", params: { threadId: bridge.state.threadId, turn: { id: bridge.state.turnId, status: "completed" } } });
   await bridge.dispatch({ type: "prompt", text: "two" });
   assert.equal(calls.filter((c) => c.method === "turn/start").at(-1).params.model, "configured-default");
   assert.equal(bridge.state.model, null);

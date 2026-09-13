@@ -1,9 +1,14 @@
-import { createIcons, Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon } from "lucide";
+import { createIcons, Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon, Pause, Play, ListOrdered, ListPlus } from "lucide";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { appendTextPreview, appendReasoningPreview } from "../core/textPreview.mjs";
+import { mergeMessageEvents } from "../core/messageOrder.mjs";
 
-const icons = { Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon };
+const icons = { Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon, Pause, Play, ListOrdered, ListPlus };
 window.ChatUI = {
+  appendTextPreview,
+  appendReasoningPreview,
+  mergeMessageEvents,
   icons(root = document) { createIcons({ icons, root, attrs: { "aria-hidden": "true", "stroke-width": 1.8 } }); },
   markdown(text) {
     return DOMPurify.sanitize(marked.parse(text || "", { gfm: true, breaks: true }), {

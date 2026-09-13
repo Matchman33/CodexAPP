@@ -16,8 +16,11 @@ import crypto from "node:crypto";
 import os from "node:os";
 import { ModelSettings } from "./modelSettings.mjs";
 import { WriterControl, isWriterConflict } from "./writerControl.mjs";
-import { listProjectTree, readThreadHistory, historyEvents, itemToEvent } from "./threadDisplay.mjs";
-import { HistoryPager, trimRecent, boundEvent } from "./historyPaging.mjs";
+import { listProjectTree, readThreadHistory, historyEvents } from "./threadDisplay.mjs";
+import { HistoryPager, HISTORY_LIMITS, trimRecent, boundEvent } from "./historyPaging.mjs";
+import { liveItemEvent, liveDeltaEvent, settleLiveEvents, completedTurnEvent } from "./liveEvents.mjs";
+import { PromptQueue } from "./promptQueue.mjs";
+import { SessionPermissions } from "./sessionPermissions.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
@@ -201,15 +204,30 @@ export class CodexBridge {
     this.pendingApprovals = new Map();
     this.commandQueue = Promise.resolve();
     this.codex = new CodexClient(config.codexBin);
+    this.permissions = new SessionPermissions(this.state, (method, params) => this.codex.request(method, params), () => this._broadcastState(), (threadId, error) => this.promptQueue.pause(threadId, error));
     this.historyPager = new HistoryPager(this.codex);
     this.history = null;
     this.models = new ModelSettings(this.codex, config, saveModel);
     this.writers = new WriterControl({ protectedPids: () => [process.pid, this.codex.child?.pid] });
+    this.promptQueue = new PromptQueue({
+      getState: () => this.state,
+      schedule: run => { const task = this.commandQueue.catch(() => {}).then(run); this.commandQueue = task; return task; },
+      execute: async item => {
+        const result = await this._prompt(item.text, item.cwd, item.id);
+        if (this.state.readOnly) throw new Error("会话被占用，消息保留在队列中");
+        return result;
+      },
+      onChange: queue => this.emit({ type: "promptQueue", queue }),
+      onSettled: turn => { if (this.state.turnId === turn.turnId) { this.state.status = "idle"; this._broadcastState(); } },
+    });
     this.codex.onNotification = (m) => this._onNotification(m);
     this.codex.onServerRequest = (m) => this._onServerRequest(m);
     this.codex.onExit = (code, sig) => {
       console.error(`[codex] exited code=${code} sig=${sig}`);
       this.state.codexConnected = false;
+      this.state.status = "idle"; this.state.turnId = null; this.state.readOnly = !!this.state.threadId;
+      this.permissions.reset();
+      this.promptQueue.disconnect();
       this._broadcastState();
       setTimeout(() => this._restart(), 1500);
     };
@@ -258,6 +276,11 @@ export class CodexBridge {
   }
   _broadcastState() { this.emit({ type: "state", state: this.state }); }
 
+  _schedulePermissions() {
+    if (!this.state.permissions.pending) return;
+    this.commandQueue = this.commandQueue.catch(() => {}).then(() => this.permissions.apply());
+  }
+
   snapshot() {
     return {
       type: "hello",
@@ -266,6 +289,7 @@ export class CodexBridge {
       pendingApprovals: [...this.pendingApprovals.values()].map((v) => v.approval),
       recentEvents: this.eventLog,
       history: this.history,
+      promptQueue: this.promptQueue.snapshot(),
       diff: this.state.lastDiff,
     };
   }
@@ -283,6 +307,7 @@ export class CodexBridge {
     const { method, params } = msg;
     const st = this.state;
     if (params?.threadId && (st.readOnly || (st.threadId && params.threadId !== st.threadId))) return;
+    if (method.startsWith("item/") && params?.turnId && st.turnId && params.turnId !== st.turnId) return;
     switch (method) {
       case "thread/started":
         if (params?.thread?.id) st.threadId = params.thread.id;
@@ -291,6 +316,7 @@ export class CodexBridge {
         break;
       case "turn/started":
         st.turnId = params?.turn?.id || st.turnId;
+        this.promptQueue.started({ threadId: st.threadId, turnId: st.turnId });
         st.status = "running"; st.lastDiff = "";
         this.emit({ type: "diff", diff: "" });
         this._pushEvent({ kind: "turn", text: "开始执行…" });
@@ -307,38 +333,42 @@ export class CodexBridge {
         }
         break;
       case "thread/settings/updated":
-        if (params?.threadId === st.threadId && params?.threadSettings?.model) {
-          st.effectiveModel = params.threadSettings.model;
+        if (params?.threadId === st.threadId && params?.threadSettings) {
+          if (params.threadSettings.model) st.effectiveModel = params.threadSettings.model;
           if (Object.hasOwn(params.threadSettings, "effort")) st.effectiveReasoningEffort = params.threadSettings.effort;
+          if (params.threadSettings.sandboxPolicy && params.threadSettings.approvalPolicy) this.permissions.observe(params.threadSettings);
           this._broadcastState();
         }
         break;
       case "turn/completed": {
+        if (params?.turn?.id && st.turnId && params.turn.id !== st.turnId) break;
         st.status = "idle";
         const usage = params?.turn?.usage || params?.turn?.tokenUsage;
         const tok = usage ? ` (tokens: ${usage.totalTokens ?? usage.total_tokens ?? "?"})` : "";
-        this._pushEvent({ kind: "turn", text: "执行完成" + tok });
+        for (const event of settleLiveEvents(this.eventLog, st.threadId, st.turnId, params?.turn?.status)) this._pushEvent(event);
+        this._pushEvent(completedTurnEvent(params?.turn, tok));
         this._broadcastState();
+        this._schedulePermissions();
+        this.promptQueue.complete({ threadId: st.threadId, turnId: params?.turn?.id || st.turnId, status: params?.turn?.status, reason: params?.turn?.error?.message });
         break;
       }
-      case "item/started": this._describeItem(params?.item, "started"); break;
-      case "item/completed": this._describeItem(params?.item, "completed"); break;
+      case "item/started": this._describeItem(params?.item, "started", params); break;
+      case "item/completed": this._describeItem(params?.item, "completed", params); break;
       case "item/agentMessage/delta": {
-        if (!params?.delta) break;
-        const id = [st.threadId, params.turnId || st.turnId, params.itemId].join(":");
-        const index = this.eventLog.findIndex((e) => e.id === id);
-        const previous = index < 0 ? null : this.eventLog[index];
-        let event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, threadId: st.threadId, turnId: params.turnId || st.turnId, text: (previous?.text || "") + params.delta, textLength: (previous?.textLength ?? previous?.text?.length ?? 0) + params.delta.length, live: true };
-        if (this.history) event = boundEvent(event, this.historyPager);
-        if (index < 0) this.eventLog.push(event); else this.eventLog[index] = event;
-        if (this.history) trimRecent(this.eventLog);
-        this.emit({ type: "assistantDelta", text: params.delta, itemId: params.itemId, turnId: params.turnId, threadId: params.threadId });
+        this._streamDelta(params, "item:agentMessage", "assistantDelta");
         break;
       }
       case "item/commandExecution/outputDelta":
       case "command/exec/outputDelta": {
-        const chunk = params?.chunk || params?.delta || params?.output;
-        if (typeof chunk === "string") this.emit({ type: "outputDelta", text: chunk });
+        this._streamDelta(params, "item:commandExecution", "outputDelta");
+        break;
+      }
+      case "item/reasoning/summaryTextDelta": {
+        this._streamDelta(params, "item:reasoning", "itemDelta", "summary");
+        break;
+      }
+      case "item/reasoning/textDelta": {
+        this._streamDelta(params, "item:reasoning", "itemDelta", "content");
         break;
       }
       case "serverRequest/resolved": {
@@ -359,11 +389,28 @@ export class CodexBridge {
     }
   }
 
-  _describeItem(item, phase) {
-    if (!item || item.type === "userMessage") return;
-    if (phase !== "completed" && item.type !== "commandExecution") return;
-    const event = itemToEvent(item);
-    if (event) this._pushEvent({ ...event, id: [this.state.threadId, this.state.turnId, item.id].join(":"), threadId: this.state.threadId, turnId: this.state.turnId });
+  _describeItem(item, phase, params = {}) {
+    const context = { threadId: this.state.threadId, turnId: params.turnId || this.state.turnId };
+    if (this.state.readOnly || !context.threadId || !context.turnId) return;
+    const previous = this.eventLog.find(e => e.id === [context.threadId, context.turnId, item?.id].join(":"));
+    const event = liveItemEvent(item, phase, context, previous, this.history ? HISTORY_LIMITS.itemChars : null);
+    if (event) this._pushEvent(event);
+  }
+
+  _streamDelta(params, kind, type, reasoningSource) {
+    const text = params?.delta ?? params?.chunk ?? params?.output, itemId = params?.itemId || params?.callId;
+    if (typeof text !== "string" || !text || !itemId || this.state.readOnly || !this.state.threadId) return;
+    if (params.turnId && this.state.turnId && params.turnId !== this.state.turnId) return;
+    const context = { threadId: this.state.threadId, turnId: params.turnId || this.state.turnId, itemId, ...(reasoningSource ? { reasoningSource } : {}) };
+    const previous = this.eventLog.find(e => e.id === [context.threadId, context.turnId, itemId].join(":"));
+    if (previous?.live === false || ["completed", "failed", "interrupted", "ended"].includes(previous?.status)) return;
+    let event = liveDeltaEvent(previous, context, text, kind, this.history ? HISTORY_LIMITS.itemChars : null);
+    if (!event) return;
+    if (this.history) event = boundEvent(event, this.historyPager);
+    const index = this.eventLog.findIndex(e => e.id === event.id);
+    if (index < 0) this.eventLog.push(event); else this.eventLog[index] = event;
+    if (this.history) trimRecent(this.eventLog);
+    this.emit({ type, ...context, kind, text });
   }
 
   // ---- client -> codex (actions) ----
@@ -378,6 +425,7 @@ export class CodexBridge {
     this.state.threadId = res?.thread?.id || res?.threadId || this.state.threadId;
     this.state.cwd = params.cwd;
     this.state.effectiveModel = res?.model || params.model;
+    this.permissions.confirm(res, params, true);
     this._broadcastState();
     return this.state.threadId;
   }
@@ -391,6 +439,16 @@ export class CodexBridge {
 
   async _dispatchCommand(m) {
     switch (m.type) {
+      case "enqueuePrompt": {
+        if (!this.state.codexConnected) throw new Error("Codex 未连接");
+        if (!this.state.threadId && !m.threadId) await this._ensureThread(m.cwd);
+        const receipt = this.promptQueue.enqueue({ requestId: m.requestId, threadId: m.threadId || this.state.threadId, text: String(m.text || "").trim(), cwd: m.cwd });
+        this.emit({ type: "promptAccepted", ...receipt, queue: this.promptQueue.snapshot() });
+        return;
+      }
+      case "cancelQueuedPrompt": return this.promptQueue.cancel(m.threadId, m.id);
+      case "pauseQueue": return this.promptQueue.pause(m.threadId);
+      case "resumeQueue": return this.promptQueue.resume(m.threadId);
       case "prompt": return this._prompt(String(m.text || "").trim(), m.cwd);
       case "steer": return this._steer(String(m.text || "").trim());
       case "interrupt": return this._interrupt(m.threadId, m.turnId);
@@ -413,11 +471,13 @@ export class CodexBridge {
         this.models.update(m);
         this.state.model = this.config.model || null;
         this.state.reasoningEffort = this.config.reasoningEffort || null;
-        if (m.approvalPolicy) this.state.approvalPolicy = m.approvalPolicy;
-        if (m.sandbox) this.state.sandbox = m.sandbox;
+        this.state.approvalPolicy = this.config.approvalPolicy;
+        this.state.sandbox = this.config.sandbox;
         if (m.cwd) this.state.cwd = m.cwd;
+        this.permissions.selected();
         this._broadcastState();
         this.emit({ type: "configSaved", requestId: m.requestId });
+        await this.permissions.apply();
         return;
       case "getState":
         if (m.historyMode === "paged") {
@@ -429,22 +489,31 @@ export class CodexBridge {
     }
   }
 
-  async _prompt(text, cwd) {
+  async _prompt(text, cwd, echoId) {
     if (!text) return;
+    if (this.state.status === "running") throw new Error("当前任务未完成，请使用消息队列或纠偏");
     const model = await this.models.resolve(cwd || this.state.cwd);
     if (!await this._ensureThread(cwd, model)) return;
+    if (this.state.status === "running") throw new Error("会话仍有运行中的任务，请等待完成后继续队列");
     const effort = await this.models.resolveEffort(cwd || this.state.cwd, model, this.state.effectiveReasoningEffort);
-    const params = { threadId: this.state.threadId, input: [{ type: "text", text, text_elements: [] }], approvalPolicy: this.state.approvalPolicy };
+    const requested = this.permissions.selection();
+    const policy = this.permissions.turnPolicy();
+    const params = { threadId: this.state.threadId, input: [{ type: "text", text, text_elements: [] }], approvalPolicy: requested.approvalPolicy, sandboxPolicy: policy };
     if (cwd) params.cwd = cwd;
     params.model = model;
     params.effort = effort;
-    this._pushEvent({ kind: "user", text });
+    const echo = this._pushEvent({ kind: "user", text, inputEcho: true, ...(echoId ? { id: echoId } : {}) });
+    const permissionRevision = this.permissions.revision;
     const res = await this.codex.request("turn/start", params);
+    this.permissions.acceptedTurn(requested, policy, permissionRevision);
+    const turnId = res?.turn?.id || res?.id || this.state.turnId;
+    if (turnId) this._pushEvent({ ...echo, turnId });
     this.state.effectiveModel = model;
     this.state.effectiveReasoningEffort = effort;
     this.state.turnId = res?.turn?.id || res?.id || this.state.turnId;
     this.state.status = "running";
     this._broadcastState();
+    return { threadId: this.state.threadId, turnId: res?.turn?.id || res?.id || null };
   }
   async _steer(text) {
     if (!this.state.threadId || !this.state.turnId) throw new Error("没有进行中的任务可纠偏");
@@ -452,6 +521,7 @@ export class CodexBridge {
     await this.codex.request("turn/steer", { threadId: this.state.threadId, expectedTurnId: this.state.turnId, input: [{ type: "text", text, text_elements: [] }] });
   }
   async _interrupt(threadId = this.state.threadId, turnId = this.state.turnId) {
+    this.promptQueue.pause(threadId, "任务已请求停止，队列暂停");
     if (!threadId || !turnId) throw new Error("没有可停止的任务；请先接续会话。");
     await this.codex.request("turn/interrupt", { threadId, turnId });
     this._pushEvent({ kind: "turn", text: "已请求中断" });
@@ -467,8 +537,10 @@ export class CodexBridge {
     this.emit({ type: "approvalResolved", key, by: "user" });
   }
   async _newThread(cwd, paged = false) {
+    if (this.state.status !== "running") this.promptQueue.select(null);
     if (this.state.status === "running") throw new Error("请先停止当前任务再新建会话");
     this.state.threadId = null; this.state.turnId = null; this.state.status = "idle";
+    this.permissions.reset();
     this.state.threadName = null; this.state.lastDiff = ""; this.state.readOnly = false;
     this.state.effectiveReasoningEffort = null;
     this.state.effectiveModel = null;
@@ -486,12 +558,14 @@ export class CodexBridge {
     if (this.state.status === "running") throw new Error("请先停止当前任务再切换会话");
     const page = paged ? await this.historyPager.open(threadId) : null;
     const t = page?.thread || await readThreadHistory(this.codex, threadId);
+    this.promptQueue.select(t.id);
     this.state.threadId = t.id;
     this.state.cwd = t.cwd || this.state.cwd;
     this.state.threadName = t.name || t.preview || null;
     this.state.turnId = null;
     this.state.status = "idle";
     this.state.readOnly = true;
+    this.permissions.reset();
     this.state.effectiveModel = null;
     this.state.effectiveReasoningEffort = null;
     this.state.lastDiff = "";
@@ -502,14 +576,16 @@ export class CodexBridge {
   async _resumeThread(threadId) {
     if (this.state.status === "running" && this.state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
     let res;
+    const requested = this.permissions.selection();
     try {
-      res = await this.codex.request("thread/resume", { threadId, approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, ...(this.history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
+      res = await this.codex.request("thread/resume", { threadId, ...requested, ...(this.history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
     } catch (error) {
       if (!isWriterConflict(error)) throw error;
       this.emit(await this.writers.inspect(threadId));
       return;
     }
     const t = res?.thread || {};
+    this.promptQueue.select(t.id || threadId);
     this.state.threadId = t.id || threadId;
     this.state.cwd = t.cwd || this.state.cwd;
     const activeTurn = (res.initialTurnsPage?.data || t.turns || []).findLast((turn) => turn.status === "inProgress");
@@ -520,6 +596,7 @@ export class CodexBridge {
     this.state.effectiveModel = res?.model || null;
     this.state.effectiveReasoningEffort = res?.reasoningEffort || null;
     this.state.readOnly = false;
+    this.permissions.confirm(res, requested);
     const beforePage = new Map(this.eventLog.map(e => [e.id, e]));
     const page = this.history ? await this.historyPager.page(this.state.threadId) : null;
     if (page) {

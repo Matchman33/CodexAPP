@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "@playwright/test";
 import { HistoryPager } from "../core/historyPaging.mjs";
+import { CodexBridge } from "../core/codexBridge.mjs";
 
 const root = path.resolve("web"), output = path.resolve("dist-check/history-ui");
 const text = ["## History", "", ...Array(120).fill("Paragraph **bold** with code."), ""].join(String.fromCharCode(10, 10));
@@ -44,6 +45,20 @@ try {
       socket = route;
       route.onMessage(async raw => {
         const m = JSON.parse(raw); sent.push(m);
+        if (m.type === "prompt") {
+          const bridge = new CodexBridge({ defaultCwd: "/fixture", approvalPolicy: "on-request", sandbox: "read-only" }, message => route.send(JSON.stringify(message)));
+          bridge.state.threadId = "second";
+          bridge.history = { paged: true, nextCursor: null };
+          bridge.models.resolve = async () => "fixture-model";
+          bridge.models.resolveEffort = async () => null;
+          bridge.codex.request = async (method, params) => {
+            assert.equal(method, "turn/start");
+            items.push({ id: "sent-user-" + width, type: "userMessage", content: [{ type: "text", text: params.input[0].text }] });
+            return { turn: { id: "turn" } };
+          };
+          await bridge.dispatch(m);
+          bridge._onNotification({ method: "turn/completed", params: { threadId: "second", turn: { id: "turn" } } });
+        }
         if (m.type === "historyPage") route.send(JSON.stringify({ type: "historyPage", ...(await pager.page(m.threadId, m.cursor)), requestId: m.requestId }));
         if (m.type === "readHistoryItem") route.send(JSON.stringify({ type: "historyItem", ...(await pager.item(m.threadId, m.detailCursor, m.offset)), requestId: m.requestId }));
         if (m.type === "listThreads") route.send(JSON.stringify({ type: "projectTree", projects: [], projectless: ["first", "second"].map(id => ({ id, name: id })) }));
@@ -140,6 +155,40 @@ try {
     socket.send(JSON.stringify({ type: "event", event: { threadId: "second", kind: "item:agentMessage", text: "HTTP stream complete" } }));
     await page.waitForFunction(() => historyFeed.events.some(e => !e.live && e.text === "HTTP stream complete" && e.id));
     assert(await page.evaluate(() => new Set(historyFeed.events.map(e => e.id)).size === historyFeed.events.length));
+    const promptText = "one submission must have one user bubble";
+    await page.locator("#input").fill(promptText);
+    await page.locator("#sendBtn").click();
+    await page.waitForFunction(text => historyFeed.events.some(e => e.kind === "user" && e.text === text), promptText);
+    await page.waitForFunction(() => appState.status === "idle");
+    await page.evaluate(() => requestHistoryPage(0, true));
+    await page.waitForFunction(() => !pageRequest);
+    assert.equal(sent.filter(m => m.type === "prompt").length, 1, "the browser must only submit once");
+    assert.equal(items.filter(item => item.id === "sent-user-" + width).length, 1, "the model backend must only receive one turn/start");
+    assert.equal(await page.evaluate(text => historyFeed.events.filter(e => e.kind === "user" && e.text === text).length, promptText), 1, "live user echo and persisted history must not create two bubbles");
+    assert.equal(await page.locator("#feed > .user .body").evaluateAll((bodies, text) => bodies.filter(body => body.textContent.trim() === text).length, promptText), 1);
+    items.splice(items.findIndex(item => item.id === "sent-user-" + width), 1);
+    const reconciliation = await page.evaluate(() => {
+      const savedPages = new Map(pageCache), savedOverlay = new Map(recentOverlay);
+      try {
+        const user = { kind: "user", text: "same text", threadId: "second" };
+        pageCache.clear(); recentOverlay.clear();
+        pageCache.set(0, [{ ...user, id: "saved-one", itemId: "one", turnId: "one" }, { ...user, id: "saved-two", itemId: "two", turnId: "two" }]);
+        recentOverlay.set("echo-one", { ...user, id: "echo-one", inputEcho: true, turnId: "one" });
+        recentOverlay.set("echo-three", { ...user, id: "echo-three", inputEcho: true, turnId: "three" });
+        showCachedHistory(true);
+        const ids = historyFeed.events.map(e => e.id);
+        pageCache.get(0)[0] = { ...pageCache.get(0)[0], text: "later content chunk", textOffset: 8192 };
+        showCachedHistory(true);
+        return { ids, retired: !recentOverlay.has("echo-one") && !historyFeed.events.some(e => e.id === "echo-one") };
+      } finally {
+        pageCache.clear(); recentOverlay.clear();
+        for (const [key, value] of savedPages) pageCache.set(key, value);
+        for (const [key, value] of savedOverlay) recentOverlay.set(key, value);
+        showCachedHistory(true);
+      }
+    });
+    assert.deepEqual(reconciliation.ids, ["saved-one", "saved-two", "echo-three"], "identical texts in different turns must remain distinct");
+    assert(reconciliation.retired, "reconciled echoes must not reappear when opening another text chunk");
     assert.equal(sent.filter(m => m.type === "resumeThread").length, 0);
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ width, fixtureEvents: 2000, initialMs, payloadBytes, renderedRows: await page.locator("#feed > .entry").count(), cachedEvents: await page.evaluate(() => historyFeed.events.length), passed: "paging, eviction, detail chunks, stale selections, streaming" }));

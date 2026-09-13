@@ -165,7 +165,8 @@ test("streaming snapshots retain partial text and completion replaces it by item
   bridge._onNotification({ method: "item/completed", params: { threadId: "one", item: message("item", "hello world!") } });
   assert.equal(bridge.eventLog.length, 1);
   assert.equal(bridge.eventLog[0].text, "hello world!");
-  assert.equal(bridge.eventLog[0].live, undefined);
+  assert.equal(bridge.eventLog[0].live, false);
+  assert.equal(bridge.eventLog[0].status, "completed");
 });
 
 test("sending from history resumes on demand without creating a different conversation", async () => {

@@ -141,6 +141,10 @@ test("initialized paged history can resume and send with experimental capability
   assert.equal(calls.at(-1).method, "turn/start");
   assert.equal(calls.at(-1).params.threadId, "one");
   assert.equal(bridge.state.readOnly, false);
+  const userEvents = bridge.eventLog.filter(e => e.kind === "user");
+  assert.equal(userEvents.length, 1);
+  assert.equal(userEvents[0].inputEcho, true);
+  assert.equal(userEvents[0].turnId, "sent");
 });
 
 test("read-only paging does not block control commands behind its response", async () => {

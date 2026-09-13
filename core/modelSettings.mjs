@@ -18,6 +18,16 @@ export function normalizeReasoningEffort(value) {
   return value;
 }
 
+export function normalizeApprovalPolicy(value) {
+  if (!["on-request", "untrusted", "on-failure", "never"].includes(value)) throw new Error("无效的审批策略");
+  return value;
+}
+
+export function normalizeSandbox(value) {
+  if (!["workspace-write", "read-only", "danger-full-access"].includes(value)) throw new Error("无效的沙箱模式");
+  return value;
+}
+
 export function persistModel(file, model, settings = {}) {
   // 只保存用户选择，不将运行时凭据或环境变量覆盖值写入磁盘。
   const config = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -25,6 +35,8 @@ export function persistModel(file, model, settings = {}) {
   try {
     const patch = { model };
     if (Object.hasOwn(settings, "reasoningEffort")) patch.reasoningEffort = settings.reasoningEffort;
+    if (Object.hasOwn(settings, "approvalPolicy")) patch.approvalPolicy = normalizeApprovalPolicy(settings.approvalPolicy);
+    if (Object.hasOwn(settings, "sandbox")) patch.sandbox = normalizeSandbox(settings.sandbox);
     fs.writeFileSync(temp, JSON.stringify({ ...config, ...patch }, null, 2), { mode: 0o600 });
     fs.renameSync(temp, file);
   } finally {
@@ -50,10 +62,12 @@ export class ModelSettings {
     const settings = {};
     if (Object.hasOwn(patch, "model")) settings.model = normalizeModel(patch.model);
     if (Object.hasOwn(patch, "reasoningEffort")) settings.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort);
+    if (Object.hasOwn(patch, "approvalPolicy")) settings.approvalPolicy = normalizeApprovalPolicy(patch.approvalPolicy);
+    if (Object.hasOwn(patch, "sandbox")) settings.sandbox = normalizeSandbox(patch.sandbox);
     if (!Object.keys(settings).length) return;
     const model = Object.hasOwn(settings, "model") ? settings.model : this.config.model;
     const effort = Object.hasOwn(settings, "reasoningEffort") ? settings.reasoningEffort : this.config.reasoningEffort;
-    this.validateEffort(model, effort);
+    if (Object.hasOwn(settings, "model") || Object.hasOwn(settings, "reasoningEffort")) this.validateEffort(model, effort);
     this.save(model ?? null, settings);
     Object.assign(this.config, settings);
   }

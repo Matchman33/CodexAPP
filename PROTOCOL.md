@@ -23,7 +23,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `historyItem` | `threadId`, `itemId?`, `text`, `offset`, `textLength`, `nextOffset`, `detailCursor`, `requestId` | 历史长文本的一个内容片段 |
 | `state` | `state` | 状态变化 |
 | `models` | `models[]`, `defaultModel`, `defaultReasoningEffort`, `error` | 响应 `listModels`；列表可能为空或部分加载失败 |
-| `configSaved` | `requestId?` | `setConfig` 已应用，模型与思考等级已保存到电脑端配置 |
+| `configSaved` | `requestId?` | 选择已保存到电脑端配置，不代表当前任务的权限已切换；实际结果见 `state.permissions` |
 | `writerConflict` | `threadId`, `owners[]`, `message` | 会话有外部写入占用；展示进程和受影响会话，不自动结束进程 |
 | `event` | `event` | 新增一条 feed 条目 |
 | `assistantDelta` | `text` | 助手回复的流式增量（拼接显示） |
@@ -49,7 +49,14 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
   "reasoningEffort": "high|null", // 已选等级，null 表示跟随默认
   "effectiveReasoningEffort": "high|null", // 最近一次任务的实际等级
   "approvalPolicy": "on-request" | "untrusted" | "on-failure" | "never",
-  "sandbox": "workspace-write" | "read-only" | "danger-full-access"
+  "sandbox": "workspace-write" | "read-only" | "danger-full-access", // 用户已保存的选择
+  "permissions": { // 可选；旧后端没有此字段
+    "supported": true,
+    "applied": { "sandbox": "workspace-write", "approvalPolicy": "on-request" } | null,
+    "pending": false,
+    "applying": false,
+    "error": "…" | null
+  }
 }
 ```
 
@@ -91,7 +98,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `interrupt` | `threadId?`, `turnId?` | 中断指定或当前任务；后端向 Codex 传齐两个 ID |
 | `approval` | `key`, `optionId` | 回传审批决策（`optionId` ∈ approve/approveSession/deny） |
 | `newThread` | `cwd?` | 新建会话 |
-| `setConfig` | `approvalPolicy?`, `sandbox?`, `cwd?`, `model?`, `reasoningEffort?`, `requestId?` | 改策略、模型与思考等级；模型和等级下一条消息生效，沙箱下个会话生效 |
+| `setConfig` | `approvalPolicy?`, `sandbox?`, `cwd?`, `model?`, `reasoningEffort?`, `requestId?` | 保存选择；模型与等级下一条消息生效，权限在当前任务结束后同步，空闲已接续会话立即同步 |
 | `listModels` | `cwd?` | 从电脑端 Codex 获取模型列表与该目录的默认模型 |
 | `getState` | — | 请求重新下发快照 |
 | `listThreads` | — | 请求会话/项目列表，服务端回 `projectTree` |
@@ -109,6 +116,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。新版网页启用下方的历史分页模式；未传 `historyMode` 的旧客户端保留完整历史读取兼容路径。历史包含文本、附件路径、计划、推理摘要和工具结果，图片本体暂不通过中继传输。事件可附带 `itemId`、`threadId`、`turnId`、`phase`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
 
 ### 历史分页与缓存
+
+普通消息的实时回显可附带 `inputEcho:true`。任务受理后使用同一 `event.id` 补齐实际 `turnId`，不是再次提交提示词。网页发现同一会话、同一轮次且文本一致的持久化用户条目时移除对应临时回显；不同轮次的相同文本仍保留为独立消息。
 
 新版网页直连时在 WebSocket 地址增加 `history=paged`；云端通过 `getState` 的 `historyMode:"paged"` 启用。打开和新建会话也传递该模式。分页快照的 `history` 为 `{ paged:true, nextCursor:string|null }`；旧客户端未声明模式时仍可通过原 `readThread` 读取完整历史，但不享受后端有界缓存优化。
 
@@ -134,9 +143,61 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 下一轮通过 `turn/start.effort` 显式传入所选或解析出的默认等级；不更改当前运行任务。恢复默认优先使用与模型匹配的 `config/read.config.model_reasoning_effort`，再使用模型目录默认值。接续后重新解析，避免已有会话的等级粘滞。无法解析默认且原会话已有明确等级时返回错误，要求明确选择。模型能力目录用于发送校验时每 60 秒尝试重新获取，失败保留上次成功目录，主动刷新列表会更新缓存。
 
 `setConfig` 新增可选字段 `model: string | null` 与 `requestId: string`。省略 `model` 保持原选择；空字符串或 `null` 恢复默认；其他类型、含空白或超过 200 字符的 ID 返回 `error`。自定义 ID 不要求出现在列表中。
-模型选择保存成功后才广播状态并返回 `configSaved`；错误返回原 `requestId`，客户端不应提前显示保存成功。其余配置保持原有内存设置行为，沙箱仍在新会话生效。
+选择保存成功后才广播状态并返回 `configSaved`；错误返回原 `requestId`，客户端不应提前显示保存成功。模型、等级、审批策略与沙箱选择持久化到中继或 Agent 配置，不覆盖凭据。工作目录仍为原有内存设置行为。
+
+### 会话权限同步
+
+`state.approvalPolicy` 与 `state.sandbox` 表示已保存的选择，`permissions.applied` 表示后端确认的实际权限；未确认时为 `null`，未知沙箱类型显示 `external-sandbox`。`pending` 表示选择尚未生效，`applying` 表示同步中，`error` 最多 1024 字符。客户端根据这些字段展示状态，不能把 `configSaved` 当作生效确认。
+
+运行中仅保存选择，不改本轮权限或已有审批；`turn/completed` 后先同步权限再启动等待消息。空闲且已接续的会话立即同步。已加载会话直接 `thread/resume` 可能忽略覆盖，因此在任务结束后按 `thread/unsubscribe`、`thread/resume` 顺序重新接续同一会话，使用 `excludeTurns: true`，不清空历史缓存。同步失败或实际权限不匹配时保留待生效状态并暂停队列；再次保存可重试，队列仍需手动继续。
+
+只读历史不自动取得写入占用；新建但尚未落盘的会话不取消订阅，在首次任务应用选择。每次 `turn/start` 显式传入 `approvalPolicy` 与结构化 `sandboxPolicy`；同沙箱模式优先保留后端确认的完整策略，收到 `thread/settings/updated` 时更新实际权限。同步和发送命令串行执行，网页重连通过快照恢复权限状态。
 
 切换模型不影响进行中的任务，从下一次 `prompt` 开始生效（含新建/接续会话）。`effectiveModel` 与已选模型可以暂时不同。恢复默认时，后端重新读取工作目录的默认模型并显式传入下一次 `turn/start`，避免已有会话沿用旧模型。只改中继/Agent 自己的配置，不修改 `~/.codex/config.toml` 或登录凭据。
+
+## 实时条目与结构化展示
+
+思考增量支持 `item/reasoning/summaryTextDelta` 和 `item/reasoning/textDelta`，归一为 `itemDelta`；新增可选 `reasoningSource`（`summary` / `content`）标记当前文本来源。摘要优先：正文已显示后首次收到摘要，清空原正文窗口及位置再累计摘要；收到摘要后忽略后续正文，二者不拼接。空的思考结束事件也更新原条目状态，保留已收到的文本；结束事件仅有正文时不覆盖已有摘要。历史读取优先返回实际摘要，没有摘要时使用实际正文。不会请求或补造上游未提供的内容。
+
+网页在思考执行中且文本为空时显示等待状态；正常结束后仍为空则隐藏条目，但保留失败或中断状态及错误信息。空内容占位不计入文本长度，流式内容仍受既有预览上限约束。
+
+消息排序以条目开始时的位置为准，不以首个文字片段或完成事件的到达时间重新排序。空的助手开始事件保留相同条目 ID 和位置，网页不显示空气泡。分页合并以历史页内的顺序为准，实时独有记录保留在相邻已知条目前；用户临时回显按会话、轮次及文本匹配持久化消息后，在原位置替换身份，避免跨页读取时改变消息及状态提示的顺序。
+
+`assistantDelta`、`outputDelta` 和新增 `itemDelta` 携带 `threadId`、`turnId`、`itemId`、`kind`、`text`。`text` 仍为本次增量，不随每个片段反复发送完整预览。命令旧版通知的 `callId` 可作为条目 ID；无法识别条目的输出忽略，不猜测其目标。过期会话、过期任务和已结束条目的输出不覆盖当前消息。
+
+`event` 及快照条目继续提供兼容 `text`，可新增以下字段：
+
+- `live`、`status`：实时或完成状态；启动、输出、完成保持相同事件 ID。状态为 `running`、`completed`、`failed`、`interrupted` 或 `ended`。任务结束时收尾未完成条目，`ended` 不等同于成功。
+- 命令：`command`（最多 2048 字符）、`exitCode`、`durationMs`、`output`（最多 8192 字符）、`outputLength`、`outputStart`。`outputStart` 为兼容文本中命令输出的绝对开始位置，历史分段据此避免重复显示命令头。
+- 文件：`changeCount` 和 `changes`。最多 20 个文件预览，路径最多 1024 字符，单文件 diff 最多 2048 字符，路径与 diff 合计最多 8192 字符；每项含 `path`、`changeKind`、`diff`、`diffLength`。完整 diff 仍在历史兼容文本中，通过内容游标读取。
+- 工具：`server`、`tool`（各最多 256 字符）和可选 `error`（最多 2048 字符）。不发送任意原始工具对象或连接配置。
+
+分页模式实时条目最多保留 `text` 最新窗口和 `headText` 开头窗口各 8192 字符，`textOffset` 为当前窗口绝对位置，`textLength` 为完整长度，`preview` 为 `head` 或 `tail`。实时窗口不保证包含全部中间文本；接续历史开头后新增内容按真实偏移记录，不伪造连续窗口。`headText` 仅在实时截断条目上保留，完成后移除，用 `detailCursor` 分段获取完整内容。历史页的字符限制仍只计算 `text`，上述有界结构化字段另有传输开销，不能将其误认为整个 JSON 的字节上限。
+
+网页实时片段只更新目标事件，按浏览器帧渲染；分页加载和持久化回显身份归并仍保留原路径。截断内容使用纯文本，不解析被截断的 Markdown。旧客户端可以忽略新增字段继续显示 `text`，但不会自动获得新的工具状态界面。
+
+## 消息队列
+
+`setConfig` 的 `approvalPolicy` 与 `sandbox` 同模型和思考等级一起校验并原子保存。只有持久化成功后才更新后端选择状态并返回 `configSaved`；保存失败不报告成功。审批策略允许 `on-request`、`untrusted`、`on-failure`、`never`，沙箱允许 `workspace-write`、`read-only`、`danger-full-access`。未传字段保留原选择，存储中的其他字段和凭据不覆盖。下一次 `turn/start` 显式传入当前审批策略；已有任务及待处理审批仍遵循其原请求，不自动批准。
+
+新增命令：
+
+| type | 字段 | 说明 |
+|---|---|---|
+| enqueuePrompt | text, threadId?, cwd?, requestId | 将普通消息排入当前会话；仅无当前会话时允许省略会话 ID 并自动新建 |
+| cancelQueuedPrompt | threadId, id, requestId? | 取消尚未开始的消息，启动中消息需使用停止任务 |
+| pauseQueue | threadId, requestId? | 暂停该会话后续消息，不中断当前任务 |
+| resumeQueue | threadId, requestId? | 手动继续当前会话队列；运行中的任务仍需先完成 |
+
+快照新增 promptQueue，字段为 supported、threadId、paused、reason、items、activeId、acceptedRequestIds、limit。items 包含 id、requestId、threadId、text、可选 cwd，以及 status（queued 或 starting）；activeId 表示正在启动或执行的队列消息。任务受理并取得 turnId 后从等待列表移除，不代表任务已完成。
+
+队列变化广播 type:"promptQueue"、queue；入队受理回传 type:"promptAccepted"、id、requestId、threadId、queue。后端先登记受理凭据再调度执行；受理不代表任务成功。错误沿用 type:"error" 并回传原 requestId。客户端应匹配自己的请求 ID 后清空对应草稿，不能把其他客户端的确认当成自己的发送确认。
+
+请求 ID 须为 1～160 个 ASCII 字母、数字或下划线、点、冒号、连字符。同 ID、同会话、同文本和同 cwd 的重试返回原凭据；变更内容则报错。保留最近 200 个凭据并保护等待及执行中的请求，已取消消息的重试也不会恢复入队。该窗口是有限的，不支持跨后端重启的幂等；网页不会自动重发未确认消息。
+
+队列仅存电脑端后端内存，关闭网页后继续保留，服务重启清空。全会话合计上限为 20 条、262144 字符，单条上限为 65536 字符，字符按 JavaScript UTF-16 长度计。等待消息按原会话 FIFO 执行，仅 turn.status 为 completed 才自动推进；中断、失败、未知状态、写入占用或 Codex 断连均暂停队列。切换会话会暂停原会话队列，只能在重新打开原会话后手动继续。消息开始执行时使用当时的模型、思考等级和审批策略。
+
+普通 prompt 保留给旧客户端，但运行中拒绝启动第二个任务。steer 不进入队列。入队时不生成用户气泡；开始执行才生成带稳定 id 和 inputEcho:true 的临时回显，并在取得任务 ID 后补齐 turnId。队列调度与任务控制共用串行命令链，历史分页仍独立处理。
 
 ## 典型时序
 

@@ -40,6 +40,10 @@ let newestPage = 0;
 const historyClientId = "history-" + Math.random().toString(36).slice(2);
 let lastSelectionId = null;
 let requestedPagedMode = false;
+let promptQueueState = null;
+let pendingPrompt = null;
+let promptTimer = null;
+let queueExpanded = true;
 let appState = {};
 let modelCatalog = [];
 let defaultModel = null;
@@ -296,6 +300,8 @@ function connect() {
 }
 
 function disposeConnection() {
+  clearTimeout(promptTimer);
+  if (pendingPrompt) { pendingPrompt.waiting = false; $("promptStatus").textContent = "连接中断，消息受理状态待确认"; }
   requestedPagedMode = false;
   clearTimeout(selectionTimer); pendingSelection = null;
   clearTimeout(pageTimer); pageRequest = null;
@@ -494,7 +500,11 @@ function handle(m) {
       writerPending = null; writerConflict = null;
       $("writerSheet").classList.add("hidden");
       appState = m.state || {};
+      promptQueueState = m.promptQueue?.supported ? m.promptQueue : null;
+      if (pendingPrompt && promptQueueState?.acceptedRequestIds?.includes(pendingPrompt.requestId)) acceptPrompt(pendingPrompt.requestId);
+      else if (pendingPrompt) pendingPrompt.waiting = false;
       applyState();
+      renderPromptQueue();
       liveAssistant = null;
       pagedHistory = !!m.history?.paged;
       historyPages = [{ cursor: null, nextCursor: m.history?.nextCursor || null }];
@@ -554,13 +564,26 @@ function handle(m) {
       break;
     case "event":
       if (pendingSelection || (m.event.threadId && m.event.threadId !== appState.threadId)) break;
-      if (m.event.kind === "user" && (input.value.trim() === m.event.text || (m.event.truncated && input.value.trim().length === m.event.textLength && input.value.trim().startsWith(m.event.text)))) { input.value = ""; input.style.height = "auto"; updateComposer(); }
+      if (m.event.kind?.startsWith("item:") && m.event.turnId && appState.turnId && m.event.turnId !== appState.turnId) break;
+      if (!promptQueueState?.supported && m.event.kind === "user" && (input.value.trim() === m.event.text || (m.event.truncated && input.value.trim().length === m.event.textLength && input.value.trim().startsWith(m.event.text)))) { input.value = ""; input.style.height = "auto"; updateComposer(); }
       renderEvent(m.event);
       scrollFeed();
       break;
     case "assistantDelta":
       if (pendingSelection || (m.threadId && m.threadId !== appState.threadId)) break;
-      appendAssistant(m.text, m.itemId);
+      appendAssistant(m.text, m.itemId, m.turnId);
+      break;
+    case "outputDelta":
+    case "itemDelta":
+      if (pendingSelection || !m.itemId || (m.threadId && m.threadId !== appState.threadId)) break;
+      appendStreamItem(m, m.type === "outputDelta" ? "item:commandExecution" : m.kind);
+      break;
+    case "promptQueue":
+      receivePromptQueue(m.queue);
+      break;
+    case "promptAccepted":
+      acceptPrompt(m.requestId);
+      receivePromptQueue(m.queue);
       break;
     case "historyPage":
       if (!pageRequest || pageRequest.requestId !== m.requestId || m.threadId !== appState.threadId) break;
@@ -585,6 +608,10 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (pendingPrompt && pendingPrompt.requestId === m.requestId) {
+        clearTimeout(promptTimer); pendingPrompt = null; $("promptStatus").textContent = m.message; updateComposer(); break;
+      }
+      if (m.requestId?.startsWith("queue-action-")) { $("promptStatus").textContent = m.message; break; }
       if (m.requestId?.startsWith(historyClientId + "-select-") && m.requestId !== lastSelectionId) break;
       if (m.requestId?.startsWith(historyClientId + "-page-") && m.requestId !== pageRequest?.requestId) break;
       if (m.requestId?.startsWith(historyClientId + "-item-") && !itemRequests.has(m.requestId)) break;
@@ -626,6 +653,7 @@ function setConn(ok, label) {
 }
 
 function applyState() {
+  renderPermissions();
   const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN) && appState.codexConnected
     && (profile.mode !== "cloud" || (!!agentPub && paired));
   $("connDot").classList.toggle("on", connected);
@@ -703,9 +731,31 @@ function receiveHistoryPage(m) {
 }
 
 function showCachedHistory(bottom = followLatest) {
-  const events = [...pageCache.keys()].sort((a,b) => b - a).flatMap(index => pageCache.get(index));
-  if (newestPage === 0) events.push(...recentOverlay.values());
-  historyFeed.replace(events, bottom);
+  const canonical = [...pageCache.keys()].sort((a,b) => b - a).flatMap(index => pageCache.get(index));
+  const overlay = newestPage === 0 ? [...recentOverlay.values()] : [];
+  const events = canonical.concat(overlay);
+  const usersByTurn = new Map();
+  for (const e of events) {
+    if (e.kind !== "user" || !e.itemId || e.inputEcho || !e.turnId) continue;
+    const key = JSON.stringify([e.threadId, e.turnId]);
+    if (!usersByTurn.has(key)) usersByTurn.set(key, []);
+    usersByTurn.get(key).push(e);
+  }
+  const replaced = new Map();
+  for (const e of events) {
+    if (!e.inputEcho || !e.turnId) continue;
+    const candidates = usersByTurn.get(JSON.stringify([e.threadId, e.turnId])) || [];
+    const saved = candidates.find(saved => (saved.textOffset || 0) === 0 && (saved.textLength ?? saved.text.length) === (e.textLength ?? e.text.length) && (saved.text.startsWith(e.text) || e.text.startsWith(saved.text)));
+    if (saved) replaced.set(e.id, saved);
+  }
+  // Replace the echo's identity in place so it remains an ordering anchor across page boundaries.
+  if (replaced.size) {
+    const anchored = [...recentOverlay.values()].map(e => replaced.get(e.id) || e);
+    recentOverlay.clear();
+    for (const e of anchored) recentOverlay.set(e.id, e);
+  }
+  for (const [index, page] of pageCache) pageCache.set(index, page.filter(e => !replaced.has(e.id)));
+  historyFeed.replace(window.ChatUI.mergeMessageEvents(canonical.filter(e => !replaced.has(e.id)), overlay.map(e => replaced.get(e.id) || e)), bottom);
 }
 
 function replaceCachedEvent(event) {
@@ -726,25 +776,38 @@ $("historyOlder").onclick = loadOlderHistory;
 $("historyNewer").onclick = () => requestHistoryPage(Math.max(0, newestPage - 1));
 
 function addContentNavigation(div, e) {
-  const nav = document.createElement("div"); nav.className = "history-content-nav";
-  const offset = e.textOffset || 0;
-  const label = document.createElement("span");
-  label.textContent = "内容 " + (offset + 1) + "–" + (offset + (e.text || "").length) + " / " + e.textLength;
-  nav.append(label);
-  for (const [next, icon, title] of [[Math.max(0, offset - 8192), "chevron-up", "上一段内容"], [offset + (e.text || "").length, "chevron-down", "下一段内容"]]) {
-    const button = document.createElement("button"); button.className = "icon-btn"; button.title = title; button.setAttribute("aria-label", title);
-    const symbol = document.createElement("i"); symbol.dataset.lucide = icon; button.append(symbol);
-    button.disabled = !!e.live || !e.detailCursor || next === offset || next >= e.textLength || [...itemRequests.values()].some(r => r.eventId === e.id);
-    button.onclick = () => {
-      const requestId = historyClientId + "-item-" + newClientId();
-      if (!sendWs({ type: "readHistoryItem", threadId: appState.threadId, detailCursor: e.detailCursor, offset: next, requestId })) return;
-      button.disabled = true;
-      const timer = setTimeout(() => { itemRequests.delete(requestId); historyFeed.upsert({ ...e }); updateHistoryControls("内容加载超时，请重试"); }, 20000);
-      itemRequests.set(requestId, { eventId: e.id, timer });
-    };
-    nav.append(button);
+  let nav = div.querySelector(".history-content-nav");
+  const shownHead = !!e.live && div.dataset.previewMode === "head" && e.headText !== undefined;
+  const offset = shownHead ? 0 : e.textOffset || 0, text = shownHead ? e.headText : e.text || "";
+  const positions = { previous: Math.max(0, offset - 8192), next: offset + text.length, head: 0, tail: Math.max(0, e.textLength - 8192) };
+  if (!nav) {
+    nav = document.createElement("div"); nav.className = "history-content-nav";
+    const label = document.createElement("span"); label.className = "content-range"; nav.append(label);
+    for (const [mode, icon, title] of [["previous", "chevron-up", "上一段内容"], ["next", "chevron-down", "下一段内容"], ["head", "arrow-up", "查看开头"], ["tail", "arrow-down", "查看最新"]]) {
+      const button = document.createElement("button"); button.className = "icon-btn"; button.title = title; button.setAttribute("aria-label", title); button.dataset.contentMode = mode;
+      button.innerHTML = '<i data-lucide="' + icon + '"></i>';
+      button.onclick = () => {
+        const current = div._event;
+        if (current.live && ["head", "tail"].includes(mode)) {
+          div.dataset.previewMode = mode; setEventText(div, current); historyFeed.dirty.add(current.id); historyFeed.schedule(); return;
+        }
+        const start = current.textOffset || 0;
+        const next = mode === "head" ? 0 : mode === "tail" ? Math.max(0, current.textLength - 8192) : mode === "previous" ? Math.max(0, start - 8192) : start + (current.text || "").length;
+        const requestId = historyClientId + "-item-" + newClientId();
+        if (!sendWs({ type: "readHistoryItem", threadId: appState.threadId, detailCursor: current.detailCursor, offset: next, requestId })) return;
+        const timer = setTimeout(() => { itemRequests.delete(requestId); historyFeed.upsert({ ...current }); updateHistoryControls("内容加载超时，请重试"); }, 20000);
+        itemRequests.set(requestId, { eventId: current.id, timer }); addContentNavigation(div, current);
+      };
+      nav.append(button);
+    }
+    div.append(nav); window.ChatUI.icons(nav);
   }
-  div.append(nav); window.ChatUI.icons(nav);
+  nav.querySelector(".content-range").textContent = (e.live && !shownHead && e.preview === "tail" ? "最新 " : "内容 ") + (offset + 1) + "–" + (offset + text.length) + " / " + e.textLength;
+  const busy = [...itemRequests.values()].some(r => r.eventId === e.id);
+  for (const button of nav.querySelectorAll("button")) {
+    const mode = button.dataset.contentMode, next = positions[mode];
+    button.disabled = e.live ? !["head", "tail"].includes(mode) || e.headText === undefined || (mode === "head" ? shownHead : !shownHead) : !e.detailCursor || busy || next === offset || next >= e.textLength;
+  }
 }
 
 function cls(kind) {
@@ -767,18 +830,52 @@ function labelFor(kind) {
 function setEventText(div, e) {
   const body = div.querySelector(".body");
   div._event = e;
+  if (!e.live) delete div.dataset.previewMode;
+  const head = !!e.live && div.dataset.previewMode === "head" && e.headText !== undefined;
+  let text = (head ? e.headText : e.text) || "";
+  if (e.kind === "item:reasoning" && !e.truncated && !text.trim()) text = e.live ? "等待可展示的思考内容" : "未收到可展示的思考内容";
+  if (e.kind === "item:commandExecution" && e.outputStart !== undefined) text = text.slice(Math.max(0, e.outputStart - (head ? 0 : e.textOffset || 0)));
+  div._copyText = text;
   if (body) {
     if (div.classList.contains("assistant")) {
       body.classList.add("markdown");
-      if (e.live) body.textContent = e.text || "";
-      else body.innerHTML = window.ChatUI.markdown(e.text || "");
-      body.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
-    } else body.textContent = e.text || "";
+      if (e.live || e.truncated) {
+        if (body.firstChild?.nodeType === Node.TEXT_NODE && body.childNodes.length === 1 && text.startsWith(body._source || "")) body.firstChild.appendData(text.slice((body._source || "").length));
+        else body.textContent = text;
+      } else {
+        body.innerHTML = window.ChatUI.markdown(text);
+        body.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+      }
+    } else body.textContent = text;
+    body._source = text;
+    if (e.live && !div.classList.contains("assistant") && body._followOutput !== false) body.scrollTop = body.scrollHeight;
   }
   const summary = div.querySelector("summary");
-  if (summary) { summary.textContent = (e.text || "").split("\n")[0]; summary.title = summary.textContent; }
-  div.querySelector(".history-content-nav")?.remove();
+  if (summary) {
+    const titles = { "item:commandExecution": "命令", "item:fileChange": "文件变更", "item:reasoning": "思考", "item:webSearch": "搜索", "item:contextCompaction": "上下文压缩", "item:mcpToolCall": "工具", "item:dynamicToolCall": "工具", "item:collabAgentToolCall": "子任务" };
+    const title = (titles[e.kind] || "执行记录") + (e.tool ? " · " + [e.server, e.tool].filter(Boolean).join("/") : "");
+    summary.querySelector(".tool-title").textContent = title; summary.title = title;
+    const status = summary.querySelector(".item-status");
+    status.textContent = ({ running: "执行中", completed: "已完成", failed: "失败", interrupted: "已停止", ended: "已结束" })[e.status] || "";
+    if (e.exitCode != null) status.textContent += " · exit " + e.exitCode;
+    status.dataset.status = e.status || "";
+  }
+  const command = div.querySelector(".tool-command");
+  if (command) { command.textContent = e.command || ""; command.classList.toggle("hidden", !e.command); }
+  const fields = div.querySelector(".tool-fields");
+  if (fields && fields._changes !== e.changes) {
+    fields.replaceChildren(); fields._changes = e.changes;
+    for (const change of e.changes || []) {
+      const row = document.createElement("div"); row.className = "changed-file";
+      const kind = document.createElement("span"); kind.textContent = change.changeKind || "修改";
+      const name = document.createElement("span"); name.textContent = change.path; row.append(kind, name); fields.append(row);
+    }
+    if (e.changeCount > (e.changes?.length || 0)) { const more = document.createElement("div"); more.textContent = "共 " + e.changeCount + " 个文件"; fields.append(more); }
+  }
+  const error = div.querySelector(".tool-error");
+  if (error) { error.textContent = e.error || ""; error.classList.toggle("hidden", !e.error); }
   if (e.truncated) addContentNavigation(div, e);
+  else div.querySelector(".history-content-nav")?.remove();
   const copy = div.querySelector(".message-actions button");
   if (copy) { copy.title = e.truncated ? "复制当前段" : "复制回复"; copy.setAttribute("aria-label", copy.title); }
 }
@@ -789,16 +886,23 @@ function createEventRow(e) {
   div.dataset.eventId = e.id || "";
   div.dataset.itemId = e.itemId || "";
   const lab = labelFor(e.kind);
-  const collapsible = e.kind?.startsWith("item:") && !["item:agentMessage", "item:plan"].includes(e.kind) && (e.text || "").includes("\n");
-  div.innerHTML = (lab ? '<div class="label">' + lab + '</div>' : "") + (collapsible ? '<details><summary></summary><div class="body"></div></details>' : '<div class="body"></div>');
+  const collapsible = e.kind?.startsWith("item:") && !["item:agentMessage", "item:plan"].includes(e.kind);
+  div.innerHTML = (lab ? '<div class="label">' + lab + '</div>' : "") + (collapsible ? '<details><summary><span class="tool-title"></span><span class="item-status"></span></summary><pre class="tool-command hidden"></pre><div class="tool-fields"></div><p class="tool-error hidden"></p><div class="body"></div></details>' : '<div class="body"></div>');
+  if (collapsible) {
+    const icon = document.createElement("i"); icon.dataset.lucide = "chevron-down"; icon.className = "tool-chevron";
+    div.querySelector("summary").prepend(icon); window.ChatUI.icons(div.querySelector("summary"));
+  }
   setEventText(div, e);
+  div.querySelector(".body").addEventListener("scroll", event => {
+    const body = event.currentTarget; body._followOutput = body.scrollHeight - body.scrollTop - body.clientHeight <= 2;
+  }, { passive: true });
   if (cls(e.kind) === "assistant") addMessageActions(div);
   return div;
 }
 
 function renderEvent(e) {
   e = { ...e, id: e.id || newClientId() };
-  const previous = historyFeed.events.find(event => event.live && e.kind === "item:agentMessage" && (!e.itemId || event.itemId === e.itemId));
+  const previous = historyFeed.events.find(event => event.live && e.kind === "item:agentMessage" && (!e.turnId || !event.turnId || e.turnId === event.turnId) && (!e.itemId || event.itemId === e.itemId));
   if (previous && previous.id !== e.id) {
     historyFeed.events = historyFeed.events.filter(event => event.id !== previous.id);
     recentOverlay.delete(previous.id);
@@ -807,25 +911,45 @@ function renderEvent(e) {
   replaceCachedEvent(e);
   if (pagedHistory) {
     recentOverlay.set(e.id, e);
-    if (recentOverlay.size > 100) recentOverlay.delete(recentOverlay.keys().next().value);
+    const evicted = recentOverlay.size > 100;
+    if (evicted) recentOverlay.delete(recentOverlay.keys().next().value);
     if (newestPage !== 0) return;
-    showCachedHistory();
+    if (e.live) {
+      if (evicted) {
+        const cached = new Set([...pageCache.values()].flatMap(page => page.map(event => event.id)));
+        historyFeed.events = historyFeed.events.filter(event => cached.has(event.id) || recentOverlay.has(event.id));
+      }
+      historyFeed.upsert(e);
+    } else showCachedHistory();
   } else historyFeed.upsert(e);
 }
 
-function appendAssistant(text, itemId) {
-  if (liveAssistant && itemId && liveAssistant.itemId !== itemId) liveAssistant = null;
-  if (!liveAssistant) liveAssistant = historyFeed.events.find(e => e.live && (!itemId || e.itemId === itemId)) || { id: "live-" + (itemId || newClientId()), kind: "item:agentMessage", itemId, text: "", live: true };
-  const length = (liveAssistant.textLength ?? liveAssistant.text.length) + text.length;
-  liveAssistant = { ...liveAssistant, text: (liveAssistant.text + text).slice(0, pagedHistory ? 8192 : undefined), textLength: length, truncated: pagedHistory && length > 8192 };
-  renderEvent(liveAssistant);
+function appendAssistant(text, itemId, turnId) {
+  liveAssistant = appendStreamItem({ text, itemId: itemId || "legacy-assistant", turnId }, "item:agentMessage");
+}
+
+function appendStreamItem(message, kind) {
+  if (!message.itemId || typeof message.text !== "string" || !kind?.startsWith("item:")) return null;
+  if (message.turnId && appState.turnId && message.turnId !== appState.turnId) return null;
+  const turnId = message.turnId || appState.turnId, id = [appState.threadId, turnId, message.itemId].join(":");
+  const previous = recentOverlay.get(id) || historyFeed.events.find(e => e.id === id);
+  if (previous && (previous.live === false || ["completed", "failed", "interrupted", "ended"].includes(previous.status) || previous.kind !== kind)) return null;
+  const base = previous || { id, kind, itemId: message.itemId, threadId: appState.threadId, turnId, text: "" };
+  const event = kind === "item:reasoning" ? window.ChatUI.appendReasoningPreview(base, message.text, message.reasoningSource || "summary", pagedHistory ? 8192 : null) : window.ChatUI.appendTextPreview(base, message.text, pagedHistory ? 8192 : null);
+  if (!event) return null;
+  if (kind === "item:commandExecution") {
+    event.output = event.text.slice(Math.max(0, (event.outputStart || 0) - (event.textOffset || 0))).slice(-8192);
+    event.outputLength = (previous?.outputLength || 0) + message.text.length;
+  }
+  renderEvent(event);
   scrollFeed();
+  return event;
 }
 
 function scrollFeed(force = false) {
   const f = $("feed");
   historyFeed.follow = followLatest || force;
-  if (followLatest || force) { f.scrollTop = f.scrollHeight; followLatest = true; historyFeed.schedule(); }
+  if (followLatest || force) { if (force) f.scrollTop = f.scrollHeight; followLatest = true; historyFeed.schedule(); }
   $("scrollBottom").classList.toggle("hidden", followLatest && newestPage === 0);
   $("emptyState").classList.toggle("hidden", historyFeed.events.length > 0);
 }
@@ -836,7 +960,7 @@ function addMessageActions(div) {
   copy.innerHTML = '<i data-lucide="copy"></i>';
   copy.onclick = async () => {
     try {
-      await navigator.clipboard.writeText(div._event?.text || "");
+      await navigator.clipboard.writeText(div._copyText ?? div._event?.text ?? "");
       copy.innerHTML = '<i data-lucide="check"></i>'; window.ChatUI.icons(copy); copy.title = "已复制";
       setTimeout(() => { copy.innerHTML = '<i data-lucide="copy"></i>'; window.ChatUI.icons(copy); copy.title = div._event?.truncated ? "复制当前段" : "复制回复"; }, 1800);
     } catch { copy.title = "复制失败，请选择文字复制"; }
@@ -916,8 +1040,18 @@ $("enableNotif").onclick = async () => {
 const input = $("input");
 function updateComposer() {
   const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN && appState.codexConnected) && (profile.mode !== "cloud" || (!!agentPub && paired));
-  const blocked = appState.status === "running" && !$("steerMode").checked;
-  $("sendBtn").disabled = !connected || !$("input").value.trim() || blocked || !!pendingSelection;
+  const blocked = appState.status === "running" && !$("steerMode").checked && !promptQueueState?.supported;
+  $("sendBtn").disabled = !connected || !$("input").value.trim() || blocked || !!pendingSelection || !!pendingPrompt;
+  $("steerMode").disabled = !!pendingPrompt;
+  const queueSend = promptQueueState?.supported && !$("steerMode").checked && (appState.status === "running" || promptQueueState.paused || promptQueueState.items.length > 0);
+  const sendLabel = queueSend ? "加入队列" : "发送消息";
+  $("sendBtn").title = sendLabel; $("sendBtn").setAttribute("aria-label", sendLabel);
+  const sendIcon = queueSend ? "list-plus" : "arrow-up";
+  if ($("sendBtn").dataset.icon !== sendIcon) { $("sendBtn").dataset.icon = sendIcon; $("sendBtn").innerHTML = '<i data-lucide="' + sendIcon + '"></i>'; window.ChatUI.icons($("sendBtn")); }
+  $("input").placeholder = $("steerMode").checked ? "补充当前任务" : queueSend ? "加入待执行队列" : "发送消息";
+  $("retryPrompt").classList.toggle("hidden", !pendingPrompt || pendingPrompt.waiting);
+  $("retryPrompt").disabled = !connected || !!pendingSelection;
+  $("queuePause").disabled = !connected || !!pendingSelection;
   $("quickNewThread").disabled = $("sidebarNewThread").disabled = appState.status === "running" || !connected;
 }
 input.addEventListener("input", () => {
@@ -931,6 +1065,10 @@ function sendPrompt() {
   if (!text) return;
   if ($("sendBtn").disabled) return;
   const steer = $("steerMode").checked;
+  if (!steer && promptQueueState?.supported) {
+    pendingPrompt = { type: "enqueuePrompt", text, threadId: appState.threadId || null, requestId: "prompt-" + newClientId(), waiting: true };
+    submitQueuedPrompt(); return;
+  }
   if (!sendWs(steer ? { type: "steer", text } : { type: "prompt", text })) return;
   if (!appState.readOnly) input.value = "";
   input.style.height = "auto";
@@ -938,6 +1076,58 @@ function sendPrompt() {
 }
 
 $("sendBtn").onclick = sendPrompt;
+function submitQueuedPrompt() {
+  if (!pendingPrompt) return;
+  pendingPrompt.waiting = true;
+  const { waiting, ...message } = pendingPrompt;
+  if (!sendWs(message)) { pendingPrompt.waiting = false; updateComposer(); return; }
+  $("promptStatus").textContent = "等待受理…";
+  clearTimeout(promptTimer);
+  promptTimer = setTimeout(() => { if (pendingPrompt?.requestId !== message.requestId) return; pendingPrompt.waiting = false; $("promptStatus").textContent = "受理确认超时，消息可能已入队"; updateComposer(); }, 12000);
+  updateComposer();
+}
+function acceptPrompt(requestId) {
+  if (!pendingPrompt || pendingPrompt.requestId !== requestId) return;
+  clearTimeout(promptTimer);
+  if (input.value.trim() === pendingPrompt.text) { input.value = ""; input.style.height = "auto"; }
+  pendingPrompt = null; $("promptStatus").textContent = ""; updateComposer();
+}
+function receivePromptQueue(queue) {
+  if (!queue?.supported) return;
+  if (pendingPrompt && queue.acceptedRequestIds?.includes(pendingPrompt.requestId)) acceptPrompt(pendingPrompt.requestId);
+  if (queue.threadId !== appState.threadId) return;
+  promptQueueState = queue; renderPromptQueue(); updateComposer();
+}
+function renderPromptQueue() {
+  const queue = promptQueueState?.threadId === appState.threadId ? promptQueueState : null;
+  $("queuePanel").classList.toggle("hidden", !queue || (!queue.items.length && !queue.paused));
+  $("queueLabel").textContent = queue ? "待执行 " + queue.items.length + " 条" + (queue.paused ? " · 已暂停" : "") : "";
+  $("queueReason").textContent = queue?.paused ? queue.reason : "";
+  $("queueReason").classList.toggle("hidden", !queue?.paused || !queue.reason);
+  const label = queue?.paused ? "继续队列" : "暂停队列";
+  $("queuePause").title = label; $("queuePause").setAttribute("aria-label", label);
+  $("queuePause").innerHTML = '<i data-lucide="' + (queue?.paused ? "play" : "pause") + '"></i>';
+  $("queueToggle").setAttribute("aria-expanded", String(queueExpanded));
+  $("queueToggle").title = queueExpanded ? "折叠待执行消息" : "展开待执行消息";
+  $("queueToggle").setAttribute("aria-label", $("queueToggle").title);
+  $("queueList").classList.toggle("hidden", !queueExpanded);
+  $("queueList").replaceChildren();
+  for (const [index, item] of (queue?.items || []).entries()) {
+    const row = document.createElement("li"); row.dataset.queueId = item.id;
+    const position = document.createElement("span"); position.className = "queue-position"; position.textContent = String(index + 1);
+    const text = document.createElement("span"); text.className = "queue-message"; text.textContent = (item.status === "starting" ? "启动中 · " : "") + item.text;
+    if (item.status === "starting") text.classList.add("queue-starting");
+    const cancel = document.createElement("button"); cancel.className = "icon-btn"; cancel.title = "取消排队消息"; cancel.setAttribute("aria-label", cancel.title); cancel.innerHTML = '<i data-lucide="x"></i>';
+    cancel.disabled = item.status !== "queued" || !sessionReady;
+    cancel.onclick = () => queueAction("cancelQueuedPrompt", { id: item.id });
+    row.append(position, text, cancel); $("queueList").append(row);
+  }
+  window.ChatUI.icons($("queuePanel"));
+}
+function queueAction(type, fields = {}) { sendWs({ type, threadId: appState.threadId, requestId: "queue-action-" + newClientId(), ...fields }); }
+$("queuePause").onclick = () => queueAction(promptQueueState?.paused ? "resumeQueue" : "pauseQueue");
+$("queueToggle").onclick = () => { queueExpanded = !queueExpanded; renderPromptQueue(); };
+$("retryPrompt").onclick = submitQueuedPrompt;
 input.addEventListener("keydown", (e) => {
   // Enter to send on hardware keyboards; Shift+Enter = newline.
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -1003,6 +1193,21 @@ function updateSettingsButtons() {
   $("cfgApply").disabled = !!pendingConfig;
   $("newThreadBtn").disabled = !!pendingConfig;
 }
+
+function renderPermissions() {
+  const permissions = appState.permissions;
+  for (const id of ["permissionStatus", "cfgPermissionStatus"]) $(id).classList.toggle("hidden", !permissions?.supported);
+  if (!permissions?.supported) return;
+  const describe = value => value.sandbox + " · " + value.approvalPolicy;
+  const selected = { sandbox: appState.sandbox || "workspace-write", approvalPolicy: appState.approvalPolicy || "on-request" };
+  const current = permissions.applied ? "当前权限：" + describe(permissions.applied) : appState.threadId ? "当前权限：未确认" : "新任务权限：" + describe(selected);
+  let status = current;
+  if (permissions.applying) status += "\n正在同步权限";
+  else if (permissions.error) status += "\n权限同步失败：" + permissions.error;
+  else if (permissions.pending) status += "\n待生效：" + describe(selected) + (appState.status === "running" ? "（本轮结束后）" : appState.readOnly ? "（接续会话后）" : "");
+  $("permissionStatus").textContent = permissions.error ? current + "\n权限同步失败：" + permissions.error.slice(0, 120) : status;
+  $("cfgPermissionStatus").textContent = status;
+}
 function configError(message) {
   clearTimeout(configTimer);
   pendingConfig = null;
@@ -1011,6 +1216,7 @@ function configError(message) {
   updateSettingsButtons();
 }
 function openSettings(focus = "cfgModel") {
+  renderPermissions();
   $("cfgCwd").value = appState.cwd || "";
   $("cfgApproval").value = appState.approvalPolicy || "on-request";
   $("cfgSandbox").value = appState.sandbox || "workspace-write";

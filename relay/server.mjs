@@ -17,8 +17,11 @@ import { WebSocketServer } from "ws";
 import { resolveCodexBin } from "../core/codexBridge.mjs";
 import { ModelSettings, persistModel } from "../core/modelSettings.mjs";
 import { WriterControl, isWriterConflict } from "../core/writerControl.mjs";
-import { listProjectTree, readThreadHistory, historyEvents, itemToEvent } from "../core/threadDisplay.mjs";
-import { HistoryPager, trimRecent, boundEvent } from "../core/historyPaging.mjs";
+import { listProjectTree, readThreadHistory, historyEvents } from "../core/threadDisplay.mjs";
+import { HistoryPager, HISTORY_LIMITS, trimRecent, boundEvent } from "../core/historyPaging.mjs";
+import { liveItemEvent, liveDeltaEvent, settleLiveEvents, completedTurnEvent } from "../core/liveEvents.mjs";
+import { PromptQueue } from "../core/promptQueue.mjs";
+import { SessionPermissions } from "../core/sessionPermissions.mjs";
 import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -140,6 +143,9 @@ class CodexClient {
     this.child.on("exit", (code, sig) => {
       console.error(`[codex] app-server exited code=${code} sig=${sig}`);
       state.codexConnected = false;
+      state.status = "idle"; state.turnId = null; state.readOnly = !!state.threadId;
+      permissions.reset();
+      promptQueue.disconnect();
       broadcastState();
       // Restart after a short delay to stay resilient.
       setTimeout(() => this._restart(), 1500);
@@ -228,9 +234,21 @@ class CodexClient {
 }
 
 const codex = new CodexClient(config.codexBin);
+const permissions = new SessionPermissions(state, (method, params) => codex.request(method, params), broadcastState, (threadId, error) => promptQueue.pause(threadId, error));
 const historyPager = new HistoryPager(codex);
 const models = new ModelSettings(codex, config, (model, settings) => persistModel(CONFIG_PATH, model, settings));
 const writers = new WriterControl({ protectedPids: () => [process.pid, codex.child?.pid] });
+const promptQueue = new PromptQueue({
+  getState: () => state,
+  schedule: run => { const task = commandQueue.catch(() => {}).then(run); commandQueue = task; return task; },
+  execute: async item => {
+    const result = await startTurn(item.text, item.cwd, item.id);
+    if (state.readOnly) throw new Error("会话被占用，消息保留在队列中");
+    return result;
+  },
+  onChange: queue => broadcast({ type: "promptQueue", queue }),
+  onSettled: turn => { if (state.turnId === turn.turnId) { state.status = "idle"; broadcastState(); } },
+});
 
 // ---------------------------------------------------------------------------
 // Approval normalization: turn a server->client approval request into a
@@ -360,6 +378,7 @@ codex.onServerRequest = (msg) => {
 function handleNotification(msg) {
   const { method, params } = msg;
   if (params?.threadId && (state.readOnly || (state.threadId && params.threadId !== state.threadId))) return;
+  if (method.startsWith("item/") && params?.turnId && state.turnId && params.turnId !== state.turnId) return;
   switch (method) {
     case "thread/started":
       if (params?.thread?.id) state.threadId = params.thread.id;
@@ -368,6 +387,7 @@ function handleNotification(msg) {
       break;
     case "turn/started":
       state.turnId = params?.turn?.id || state.turnId;
+      promptQueue.started({ threadId: state.threadId, turnId: state.turnId });
       state.status = "running";
       state.lastDiff = "";
       broadcast({ type: "diff", diff: "" });
@@ -385,42 +405,46 @@ function handleNotification(msg) {
       }
       break;
     case "thread/settings/updated":
-      if (params?.threadId === state.threadId && params?.threadSettings?.model) {
-        state.effectiveModel = params.threadSettings.model;
+      if (params?.threadId === state.threadId && params?.threadSettings) {
+        if (params.threadSettings.model) state.effectiveModel = params.threadSettings.model;
         if (Object.hasOwn(params.threadSettings, "effort")) state.effectiveReasoningEffort = params.threadSettings.effort;
+        if (params.threadSettings.sandboxPolicy && params.threadSettings.approvalPolicy) permissions.observe(params.threadSettings);
         broadcastState();
       }
       break;
     case "turn/completed": {
+      if (params?.turn?.id && state.turnId && params.turn.id !== state.turnId) break;
       state.status = "idle";
       const usage = params?.turn?.usage || params?.turn?.tokenUsage;
       const tok = usage ? ` (tokens: ${usage.totalTokens ?? usage.total_tokens ?? "?"})` : "";
-      pushEvent({ kind: "turn", text: "执行完成" + tok });
+      for (const event of settleLiveEvents(eventLog, state.threadId, state.turnId, params?.turn?.status)) pushEvent(event);
+      pushEvent(completedTurnEvent(params?.turn, tok));
       broadcastState();
+      schedulePermissions();
+      promptQueue.complete({ threadId: state.threadId, turnId: params?.turn?.id || state.turnId, status: params?.turn?.status, reason: params?.turn?.error?.message });
       break;
     }
     case "item/started":
-      describeItem(params?.item, "started");
+      describeItem(params?.item, "started", params);
       break;
     case "item/completed":
-      describeItem(params?.item, "completed");
+      describeItem(params?.item, "completed", params);
       break;
     case "item/agentMessage/delta": {
-      if (!params?.delta) break;
-      const id = [state.threadId, params.turnId || state.turnId, params.itemId].join(":");
-      const index = eventLog.findIndex((e) => e.id === id);
-      const previous = index < 0 ? null : eventLog[index];
-      let event = { id, ts: previous?.ts || Date.now(), kind: "item:agentMessage", itemId: params.itemId, threadId: state.threadId, turnId: params.turnId || state.turnId, text: (previous?.text || "") + params.delta, textLength: (previous?.textLength ?? previous?.text?.length ?? 0) + params.delta.length, live: true };
-      if (history) event = boundEvent(event, historyPager);
-      if (index < 0) eventLog.push(event); else eventLog[index] = event;
-      if (history) trimRecent(eventLog);
-      broadcast({ type: "assistantDelta", text: params.delta, itemId: params.itemId, turnId: params.turnId, threadId: params.threadId });
+      streamDelta(params, "item:agentMessage", "assistantDelta");
       break;
     }
     case "item/commandExecution/outputDelta":
     case "command/exec/outputDelta": {
-      const chunk = params?.chunk || params?.delta || params?.output;
-      if (chunk) broadcast({ type: "outputDelta", text: typeof chunk === "string" ? chunk : "" });
+      streamDelta(params, "item:commandExecution", "outputDelta");
+      break;
+    }
+    case "item/reasoning/summaryTextDelta": {
+      streamDelta(params, "item:reasoning", "itemDelta", "summary");
+      break;
+    }
+    case "item/reasoning/textDelta": {
+      streamDelta(params, "item:reasoning", "itemDelta", "content");
       break;
     }
     case "serverRequest/resolved": {
@@ -451,11 +475,28 @@ function handleNotification(msg) {
   }
 }
 
-function describeItem(item, phase) {
-  if (!item || item.type === "userMessage") return;
-  if (phase !== "completed" && item.type !== "commandExecution") return;
-  const event = itemToEvent(item);
-  if (event) pushEvent({ ...event, id: [state.threadId, state.turnId, item.id].join(":"), threadId: state.threadId, turnId: state.turnId });
+function describeItem(item, phase, params = {}) {
+  const context = { threadId: state.threadId, turnId: params.turnId || state.turnId };
+  if (state.readOnly || !context.threadId || !context.turnId) return;
+  const previous = eventLog.find(e => e.id === [context.threadId, context.turnId, item?.id].join(":"));
+  const event = liveItemEvent(item, phase, context, previous, history ? HISTORY_LIMITS.itemChars : null);
+  if (event) pushEvent(event);
+}
+
+function streamDelta(params, kind, type, reasoningSource) {
+  const text = params?.delta ?? params?.chunk ?? params?.output, itemId = params?.itemId || params?.callId;
+  if (typeof text !== "string" || !text || !itemId || state.readOnly || !state.threadId) return;
+  if (params.turnId && state.turnId && params.turnId !== state.turnId) return;
+  const context = { threadId: state.threadId, turnId: params.turnId || state.turnId, itemId, ...(reasoningSource ? { reasoningSource } : {}) };
+  const previous = eventLog.find(e => e.id === [context.threadId, context.turnId, itemId].join(":"));
+  if (previous?.live === false || ["completed", "failed", "interrupted", "ended"].includes(previous?.status)) return;
+  let event = liveDeltaEvent(previous, context, text, kind, history ? HISTORY_LIMITS.itemChars : null);
+  if (!event) return;
+  if (history) event = boundEvent(event, historyPager);
+  const index = eventLog.findIndex(e => e.id === event.id);
+  if (index < 0) eventLog.push(event); else eventLog[index] = event;
+  if (history) trimRecent(eventLog);
+  broadcast({ type, ...context, kind, text });
 }
 
 codex.onNotification = handleNotification;
@@ -496,33 +537,41 @@ async function ensureThread(cwd, model) {
   state.threadId = res?.thread?.id || res?.threadId || state.threadId;
   state.cwd = params.cwd;
   state.effectiveModel = res?.model || params.model;
+  permissions.confirm(res, params, true);
   broadcastState();
   return state.threadId;
 }
 
-async function startTurn(text, cwd) {
+async function startTurn(text, cwd, echoId) {
   if (!text) return;
+  if (state.status === "running") throw new Error("当前任务未完成，请使用消息队列或纠偏");
   const model = await models.resolve(cwd || state.cwd);
   if (!await ensureThread(cwd, model)) return;
+  if (state.status === "running") throw new Error("会话仍有运行中的任务，请等待完成后继续队列");
   const effort = await models.resolveEffort(cwd || state.cwd, model, state.effectiveReasoningEffort);
+  const requested = permissions.selection(), policy = permissions.turnPolicy();
   const params = {
     threadId: state.threadId,
     input: [{ type: "text", text, text_elements: [] }],
-    // Re-assert gating each turn so a "never" config.toml can't silently
-    // disable the approvals this whole app exists to provide.
-    approvalPolicy: state.approvalPolicy,
-    sandboxPolicy: undefined, // sandbox set at thread level; leave turn default
+    // 每轮显式传入用户选择，避免已有会话沿用旧审批策略。
+    approvalPolicy: requested.approvalPolicy,
+    sandboxPolicy: policy,
   };
   if (cwd) params.cwd = cwd;
   params.model = model;
   params.effort = effort;
-  pushEvent({ kind: "user", text });
+  const echo = pushEvent({ kind: "user", text, inputEcho: true, ...(echoId ? { id: echoId } : {}) });
+  const permissionRevision = permissions.revision;
   const res = await codex.request("turn/start", params);
+  permissions.acceptedTurn(requested, policy, permissionRevision);
+  const turnId = res?.turn?.id || res?.id || state.turnId;
+  if (turnId) pushEvent({ ...echo, turnId });
   state.effectiveModel = model;
   state.effectiveReasoningEffort = effort;
   state.turnId = res?.turn?.id || res?.id || state.turnId;
   state.status = "running";
   broadcastState();
+  return { threadId: state.threadId, turnId: res?.turn?.id || res?.id || null };
 }
 
 async function steerTurn(text) {
@@ -536,6 +585,7 @@ async function steerTurn(text) {
 }
 
 async function interruptTurn(threadId = state.threadId, turnId = state.turnId) {
+  promptQueue.pause(threadId, "任务已请求停止，队列暂停");
   if (!threadId || !turnId) throw new Error("没有可停止的任务；请先接续会话。");
   await codex.request("turn/interrupt", { threadId, turnId });
   pushEvent({ kind: "turn", text: "已请求中断" });
@@ -559,8 +609,10 @@ async function resolveApproval(key, optionId) {
 }
 
 async function newThread(cwd, paged = false) {
+  if (state.status !== "running") promptQueue.select(null);
   if (state.status === "running") throw new Error("请先停止当前任务再新建会话");
   state.threadId = null;
+  permissions.reset();
   state.turnId = null;
   state.status = "idle";
   state.threadName = null;
@@ -584,12 +636,14 @@ async function readThread(threadId, paged = false, requestId) {
   if (state.status === "running") throw new Error("请先停止当前任务再切换会话");
   const page = paged ? await historyPager.open(threadId) : null;
   const t = page?.thread || await readThreadHistory(codex, threadId);
+  promptQueue.select(t.id);
   state.threadId = t.id;
   state.cwd = t.cwd || state.cwd;
   state.threadName = t.name || t.preview || null;
   state.turnId = null;
   state.status = "idle";
   state.readOnly = true;
+  permissions.reset();
   state.effectiveModel = null;
   state.effectiveReasoningEffort = null;
   state.lastDiff = "";
@@ -602,13 +656,15 @@ async function readThread(threadId, paged = false, requestId) {
 async function resumeThread(threadId) {
   if (state.status === "running" && state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
   let res;
+  const requested = permissions.selection();
   try {
-    res = await codex.request("thread/resume", { threadId, approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, ...(history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
+    res = await codex.request("thread/resume", { threadId, ...requested, ...(history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
   } catch (error) {
     if (!isWriterConflict(error)) throw error;
     return writers.inspect(threadId);
   }
   const t = res?.thread || {};
+  promptQueue.select(t.id || threadId);
   state.threadId = t.id || threadId;
   state.cwd = t.cwd || state.cwd;
   const activeTurn = (res.initialTurnsPage?.data || t.turns || []).findLast((turn) => turn.status === "inProgress");
@@ -620,6 +676,7 @@ async function resumeThread(threadId) {
   state.effectiveReasoningEffort = res?.reasoningEffort || null;
 
   state.readOnly = false;
+  permissions.confirm(res, requested);
   const beforePage = new Map(eventLog.map(e => [e.id, e]));
   const page = history ? await historyPager.page(state.threadId) : null;
   if (page) {
@@ -692,6 +749,10 @@ function broadcastState() {
   broadcast({ type: "state", state });
 }
 
+function schedulePermissions() {
+  if (state.permissions.pending) commandQueue = commandQueue.catch(() => {}).then(() => permissions.apply());
+}
+
 function snapshot() {
   return {
     type: "hello",
@@ -700,6 +761,7 @@ function snapshot() {
     pendingApprovals: [...pendingApprovals.values()].map((v) => v.approval),
     recentEvents: eventLog,
     history,
+    promptQueue: promptQueue.snapshot(),
     diff: state.lastDiff,
   };
 }
@@ -736,6 +798,16 @@ wss.on("connection", (ws, req) => {
     commandQueue = commandQueue.catch(() => {}).then(async () => {
       try {
         switch (m.type) {
+          case "enqueuePrompt": {
+            if (!state.codexConnected) throw new Error("Codex 未连接");
+            if (!state.threadId && !m.threadId) await ensureThread(m.cwd);
+            const receipt = promptQueue.enqueue({ requestId: m.requestId, threadId: m.threadId || state.threadId, text: String(m.text || "").trim(), cwd: m.cwd });
+            send(ws, { type: "promptAccepted", ...receipt, queue: promptQueue.snapshot() });
+            break;
+          }
+          case "cancelQueuedPrompt": promptQueue.cancel(m.threadId, m.id); break;
+          case "pauseQueue": promptQueue.pause(m.threadId); break;
+          case "resumeQueue": promptQueue.resume(m.threadId); break;
           case "prompt":
             await startTurn(String(m.text || "").trim(), m.cwd);
             break;
@@ -781,11 +853,13 @@ wss.on("connection", (ws, req) => {
             models.update(m);
             state.model = config.model || null;
             state.reasoningEffort = config.reasoningEffort || null;
-            if (m.approvalPolicy) state.approvalPolicy = m.approvalPolicy;
-            if (m.sandbox) state.sandbox = m.sandbox;
+            state.approvalPolicy = config.approvalPolicy;
+            state.sandbox = config.sandbox;
             if (m.cwd) state.cwd = m.cwd;
+            permissions.selected();
             broadcastState();
             send(ws, { type: "configSaved", requestId: m.requestId });
+            await permissions.apply();
             break;
           case "getState":
             if (m.historyMode === "paged") {

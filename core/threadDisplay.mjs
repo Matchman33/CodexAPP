@@ -106,13 +106,36 @@ function toolResultText(result) {
 
 export function itemToEvent(item) {
   let text;
+  const fields = {};
   switch (item.type) {
     case "userMessage":
       text = (item.content || []).map((c) => c.type === "text" ? c.text : c.type === "image" || c.type === "localImage" ? "[图片] " + (c.path || c.url || "") : c.type === "skill" ? "[技能] " + (c.name || c.path || "") : c.type === "mention" ? "[引用] " + (c.name || c.path || "") : "").join("\n"); break;
     case "agentMessage": case "plan": text = item.text; break;
-    case "reasoning": text = (item.summary?.length ? item.summary : item.content || []).join("\n"); break;
-    case "commandExecution": text = "$ " + item.command + (item.exitCode != null ? "  →  exit " + item.exitCode : "") + (item.aggregatedOutput ? "\n" + item.aggregatedOutput : ""); break;
-    case "fileChange": text = (item.changes || []).map((c) => c.path + (c.diff ? "\n" + c.diff : "")).join("\n"); break;
+    case "reasoning": {
+      const joined = (item.summary || []).join("\n"), summary = joined.trim() ? joined : "";
+      text = summary || (item.content || []).join("\n");
+      fields.reasoningSource = summary ? "summary" : "content";
+      break;
+    }
+    case "commandExecution": {
+      const prefix = "$ " + (item.command || "") + (item.exitCode != null ? "  →  exit " + item.exitCode : "") + "\n";
+      const output = item.aggregatedOutput || "";
+      Object.assign(fields, { command: (item.command || "").slice(0, 2048), exitCode: item.exitCode ?? null, durationMs: item.durationMs ?? null, output: output.slice(0, 8192), outputLength: output.length, outputStart: prefix.length });
+      text = prefix + output; break;
+    }
+    case "fileChange": {
+      text = (item.changes || []).map((c) => c.path + (c.diff ? "\n" + c.diff : "")).join("\n") || "文件变更";
+      let budget = 8192;
+      fields.changeCount = item.changes?.length || 0;
+      fields.changes = [];
+      for (const change of (item.changes || []).slice(0, 20)) {
+        const path = String(change.path || "").slice(0, Math.min(1024, budget)); budget -= path.length;
+        const diff = String(change.diff || "").slice(0, Math.min(2048, budget)); budget -= diff.length;
+        fields.changes.push({ path, diff, diffLength: change.diff?.length || 0, changeKind: String(change.kind?.type || change.kind || "").slice(0, 32) });
+        if (!budget) break;
+      }
+      break;
+    }
     case "webSearch": text = "搜索: " + (item.query || JSON.stringify(item.action)); break;
     case "mcpToolCall": text = "工具: " + item.server + "/" + item.tool + (item.result ? "\n" + toolResultText(item.result) : "") + (item.error ? "\n" + item.error.message : ""); break;
     case "dynamicToolCall": text = "工具: " + [item.namespace, item.tool].filter(Boolean).join("/") + (item.contentItems ? "\n" + item.contentItems.map((c) => c.text || "[图片]").join("\n") : ""); break;
@@ -123,7 +146,13 @@ export function itemToEvent(item) {
     case "contextCompaction": text = "上下文已压缩"; break;
     default: return null;
   }
-  return text ? { kind: item.type === "userMessage" ? "user" : "item:" + item.type, text, itemId: item.id, phase: item.phase || null } : null;
+  if (["mcpToolCall", "dynamicToolCall", "collabAgentToolCall"].includes(item.type)) {
+    fields.tool = String(item.tool || "").slice(0, 256);
+    fields.server = String(item.server || item.namespace || "").slice(0, 256);
+  }
+  if (item.error?.message) fields.error = String(item.error.message).slice(0, 2048);
+  if (item.status) fields.status = item.status === "inProgress" ? "running" : ["declined", "denied"].includes(item.status) ? "failed" : String(item.status).slice(0, 32);
+  return text ? { kind: item.type === "userMessage" ? "user" : "item:" + item.type, text, itemId: item.id, phase: item.phase || null, ...fields } : null;
 }
 
 export function historyEvents(thread) {

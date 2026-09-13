@@ -128,6 +128,17 @@
     <button id="diffBar" class="diff-bar hidden"><i data-lucide="file-diff"></i>查看本次改动</button>
 
     <footer class="composer">
+      <p id="permissionStatus" class="permission-status hidden" role="status"></p>
+      <section id="queuePanel" class="queue-panel hidden" aria-label="待执行消息">
+        <div class="queue-header">
+          <button id="queueToggle" class="icon-btn" aria-label="折叠待执行消息" title="折叠待执行消息" aria-expanded="true"><i data-lucide="list-ordered"></i></button>
+          <span id="queueLabel" role="status"></span>
+          <button id="queuePause" class="icon-btn" aria-label="暂停队列" title="暂停队列"><i data-lucide="pause"></i></button>
+        </div>
+        <p id="queueReason" class="queue-reason hidden" role="status"></p>
+        <ol id="queueList" class="queue-list"></ol>
+      </section>
+      <div class="prompt-status"><span id="promptStatus" role="status"></span><button id="retryPrompt" class="icon-btn hidden" aria-label="重试确认消息" title="重试确认消息"><i data-lucide="refresh-cw"></i></button></div>
       <div id="runningBar" class="running-bar hidden">
         <span class="muted small"><span class="working-dot"></span>正在处理</span>
         <button id="interruptBtn" class="icon-btn stop-btn" aria-label="停止当前任务" title="停止当前任务"><i data-lucide="square"></i></button>
@@ -179,6 +190,7 @@
         <option value="read-only">read-only</option>
         <option value="danger-full-access">danger-full-access</option>
       </select>
+      <p id="cfgPermissionStatus" class="permission-status hidden" role="status"></p>
       <div class="sheet-actions">
         <button id="cfgApply" class="btn primary">应用</button>
         <button id="newThreadBtn" class="btn secondary">新建会话</button>
