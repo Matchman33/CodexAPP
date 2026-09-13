@@ -35,6 +35,19 @@ web/vendor/chat-ui.js
 
 # frp 本地配置、部署密钥、客户端包与证书
 deploy/frp/runtime/
+deploy/frp/stack.local.json
+deploy/frp/.staging-*/
+
+# NPS 官方包、运行配置、面板密码与客户端 vkey
+deploy/nps/runtime/
+deploy/nps/stack.local.json
+deploy/nps/.staging-*/
+
+# 当前目录手动安装的 NPC 二进制及私有客户端配置
+/npc.exe
+/conf/npc.conf
+/conf/npc.conf.default
+/conf/multi_account.conf
 
 # Native build outputs (archived projects)
 **/build/
