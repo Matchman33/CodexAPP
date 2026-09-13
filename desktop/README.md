@@ -3,6 +3,8 @@
 真正的桌面程序窗口(不是网页):内部运行 agent(连 Broker + 驱动本地 Codex),
 界面在一个原生 Electron 窗口里显示。
 
+当前桌面启动器运行的是保留的云 Agent 路线，不会启动根目录的本地 4123 中继，也不安装或启动 NPC。选择 NPS、Tailscale 或局域网直连时，在根目录启动本地中继，按 [主说明的远程访问章节](../README.md#4-手机远程访问用户自选映射) 自行维护映射；不能把本目录的 npm start 当成本地中继入口。
+
 ## 开发运行
 ```bash
 cd desktop
@@ -19,5 +21,5 @@ npm run dist       # 产出 dist/CodexApp-Setup-<version>.exe (NSIS 安装包)
 ## 说明
 - `build.mjs` 用 esbuild 把 `../cloud/agent.mjs` 打成 `agent.cjs`,由 Electron 主进程 require。
 - 配置/密钥存在用户目录(`app.getPath("userData")`),不在安装目录。
-- 云端 Broker 固定为 `https://broker.the5288.cn`;局域网模式不受影响。
+- 云端 Broker 使用现有 Agent 配置；它与根目录本地中继是不同路线，具体配置见 [云端说明](../cloud/README.md)。
 - 未签名:Windows SmartScreen 首次会提示,正式发布请用代码签名证书。

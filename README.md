@@ -18,9 +18,9 @@
 
 ## 仓库结构
 
-**CodexAPP 只启动本地中继与端口，不集成或自动启动映射工具。** 默认端口为 4123，原有 Token 鉴权、会话、审批和任务停止保留。公网映射由用户自行选择和维护，**首推 NPS/NPC**；也可以使用 Tailscale、frp 或局域网直连，见 [远程访问与端口映射说明](docs/远程访问与端口映射说明.md)。
+**CodexAPP 只启动本地中继与端口，不集成或自动启动映射工具。** 默认端口为 4123，原有 Token 鉴权、会话、审批和任务停止保留。公网映射由用户自行选择和维护，**首推 NPS/NPC**；也可以使用 Tailscale、frp 或局域网直连，见下文 [手机远程访问](#4-手机远程访问用户自选映射)。
 
-不想维护服务器时，可使用下文 Tailscale Serve 路线，不需要自有服务器、NPS/frp 或本项目云账号。Windows 用户选择 NPS 时可手动执行 `npm run npc:install`，将 NPC 安装到当前项目目录，见 [NPC 客户端安装说明](docs/NPC客户端安装说明.md)。此命令只调用用户提供的安装脚本，不自动连接 NPS 或启动系统服务。
+不想维护服务器时，可使用下文 [Tailscale Serve](#tailscale-serve) 路线，不需要自有服务器、NPS/frp 或本项目云账号。Windows 用户选择 NPS 时可手动执行 `npm run npc:install`，将 NPC 安装到当前项目目录，见 [NPS 快速接入](#nps-快速接入)。此命令只调用用户提供的安装脚本，不自动连接 NPS 或启动系统服务。
 
 已有 frp 用户可自行继续维护其部署；项目不再提供服务器映射安装和续期脚本，具体部署由用户按所选版本官方说明完成。
 
@@ -37,6 +37,7 @@ CodexApp/
 ├─ archive/      已退役的原生工程（native-android / native-ios，留作参考）
 ├─ PROTOCOL.md   中继 ↔ 客户端 协议规范
 ├─ codexapp.config.json   中继配置（首次启动自动生成 token）
+├─ install.ps1   Windows NPC 手动安装脚本（不参与 npm start）
 └─ package.json
 ```
 
@@ -111,13 +112,62 @@ App 里可调：`on-request`(默认) / `untrusted`(几乎每条都问) / `on-fai
 
 ## 4. 手机远程访问（用户自选映射）
 
-公网 IP 映射首推用户独立部署 NPS/NPC，方式见 [远程访问与端口映射说明](docs/远程访问与端口映射说明.md)。以下保留无需自有服务器的 Tailscale Serve 操作，已有 frp 用户也可自行维护原部署。三者均不参与 npm start，不启用任何映射工具也能使用本地中继。实际速度以同网络对比结果为准。
+公网 IP 映射首推用户独立部署 NPS/NPC。下文同时保留无需自有服务器的 Tailscale Serve 操作，已有 frp 用户也可自行维护原部署。三者均不参与 npm start，不启用任何映射工具也能使用本地中继。实际速度以同网络对比结果为准。
+
+### 方案选择
+
+| 方案 | 使用方式 | 自有公网服务器 |
+|---|---|---|
+| NPS/NPC（首推） | 服务器运行 NPS，项目电脑运行 NPC，按电脑分配独立 TCP 映射 | 通常需要 |
+| Tailscale Serve | 手机与电脑接入同一 tailnet，使用私网 HTTPS 入口 | 不需要 |
+| frp | 用户按所选版本官方说明独立维护隧道 | 通常需要 |
+| 局域网直连 | 使用电脑局域网地址、本地端口和应用 Token | 不需要 |
+
+### NPS 快速接入
+
+Windows 项目根目录可手动执行客户端安装：
+
+```powershell
+npm run npc:install
+```
+
+等价命令为 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 npc latest .`。最后的 `.` 是当前项目目录，输出为根目录 `npc.exe` 和 `conf/npc.conf`。必须使用 `npc` 模式：`nps` 安装服务端，`all` 安装两者，服务端包可能覆盖本项目 `web/`，不要在本目录使用这两个模式。
+
+此快捷命令仅适用于 Windows，不会自动连接 NPS、注册服务、开机自启或启动另一个 Codex。`latest` 在安装时尝试解析最新发行，并使用脚本原有镜像回退；不保证与既有服务器兼容。需对齐版本时，例如执行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 npc v0.34.7 .`。安装脚本未提供包 SHA-256 校验，请用户自行确认下载来源，不在 NPC 正使用二进制时重跑安装。
+
+安装后编辑 `conf/npc.conf`，按服务器实际设置填写 `server_addr`、`conn_type` 和 `vkey`。已有配置会保留，新模板写入 `conf/npc.conf.default`。不要用发行包示例密钥，不把真实 vkey 放入 package.json、公开命令、日志或截图；相关客户端配置和二进制均被 Git 忽略。
+
+先确认项目电脑的中继已运行，健康检查的 `ok` 和 `codexConnected` 都为 true，再手动启动 NPC：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:4123/health
+.\npc.exe -config=".\conf\npc.conf" -log=off
+```
+
+如果本机中继已运行，不要重复 npm start。NPC 应与 CodexAPP 在同一电脑、同一本地网络环境运行，不能把服务器、WSL 或容器里的回环地址误当成 Windows 本机服务。不要同时运行相同设备身份的多个 NPC。
+
+NPS 服务器由用户独立安装和管理，不在服务器安装 CodexAPP 或复制电脑 Codex 凭据。建议 NPC 使用 TLS 接入服务器（当前配置示例为 TCP 8025），面板创建 TCP 隧道；HTTP 和 WebSocket 都可由同一 TCP 映射承载，客户端 `-type=ws` 不是网页使用 WebSocket 的必要条件。
+
+| 隧道字段 | 建议 |
+|---|---|
+| 类型 | TCP |
+| 客户端 | 运行 CodexAPP 的对应电脑 |
+| 服务端端口 | 用户指定且空闲，例如 18123；按需放行安全组和防火墙 |
+| 目标 | 127.0.0.1:4123，由项目电脑的 NPC 访问 |
+| 本地代理 | 关闭，避免由服务器直接访问回环目标 |
+| PROXY protocol | 禁用 / 0，本地 Node HTTP 服务不解析 V1/V2 前缀 |
+
+两台电脑可以各自使用本地 4123，但应使用独立 vkey 和公网端口，例如 A 为 18123、B 为 18124；访问哪台电脑就填写那台的 CodexAPP 应用 Token。NPS vkey、面板密码和应用 Token 不能互换。
+
+浏览器入口示例为 `http://服务器IP:18123/`。NPC 到服务器的 TLS 不会让公网浏览器入口自动变成 HTTPS；公网 HTTP/WS 仅用于临时联通测试，正式任务和审批应使用 HTTPS/WSS 或可信私网入口。NPS 面板、证书、来源限制及后台运行仍由用户维护。
+
+### Tailscale Serve
 
 已有 **Tailscale Serve** 方案不使用 Funnel 公网入口。电脑与手机都安装并连接同一个 Tailscale 网络，Serve 为本地中继提供仅限私网访问的 HTTPS 地址，不需要部署本项目的云端 Broker。
 
 Serve 在两端成功点对点直连时有机会减少中转延迟；无法直连时仍可能走中继，不能保证一定比 Funnel 快。手机必须开启 Tailscale，仅用普通浏览器但未接入 Tailscale 网络无法访问。
 
-### 电脑端启动
+#### 电脑端启动
 
 1. 在项目根目录运行 `npm start`，保持中继进程运行。确认本机访问 `http://127.0.0.1:4123/health` 返回 `"ok": true`。
 2. 在另一个 PowerShell 窗口启用 Serve：
@@ -146,7 +196,7 @@ tailscale serve --bg 4123
 
 确认 `tailscale serve status` 显示 **`tailnet only`**。本项目不需要 Funnel，不应再运行 `tailscale funnel --bg 4123` 将同一地址改回公网模式。
 
-### 手机连接
+#### 手机连接
 
 1. 手机安装 Tailscale，登录并加入电脑所在的同一网络，开启连接。确认电脑和手机都在线；手机无需与电脑连接同一 WiFi。
 2. 浏览器打开 Serve 输出的 HTTPS 地址，**不要加 `:4123`**。网页识别到电脑中继后，默认显示 **「中继直连」** 并填入当前页面地址，不需要注册云账号。
@@ -154,7 +204,7 @@ tailscale serve --bg 4123
 
 Expo 客户端也使用相同的 HTTPS 中继地址和 Token。浏览器支持时可添加到主屏幕；HTTPS 本身不保证手机锁屏后网页仍保持连接或持续接收通知。
 
-### 首次连接与切换网络
+#### 首次连接与切换网络
 
 - 在家和外出均使用同一个 Serve HTTPS 域名。局域网 IP 与 HTTPS 域名是不同的网页来源，各自保存连接配置；换地址后需要重新输入 Token，不会共享登录信息。
 - 已保存配置时会先进入对话页，但只有收到中继的初始化消息后才允许发送。看到对话页不代表连接已经成功。
@@ -162,7 +212,7 @@ Expo 客户端也使用相同的 HTTPS 中继地址和 Token。浏览器支持�
 - HTTPS 页面填写 HTTP 中继地址会直接提示更换地址，而不是一直显示连接中。Token 无效时保留地址并返回连接页，避免反复自动重连。
 - 这些处理减少页面等待和旧连接干扰，不能消除 Tailscale 建链或中继线路的延迟。手机切到移动网络时仍需保持 Tailscale 开启。
 
-### 检查与关闭
+#### 检查与关闭
 
 ```powershell
 tailscale serve status              # 应显示 tailnet only
@@ -177,16 +227,16 @@ tailscale status                    # 检查电脑和手机是否在线
 
 访问范围和 HTTPS 配置见 [Tailscale Serve 官方文档](https://tailscale.com/docs/features/tailscale-serve)。
 
-### 延迟与下一步改进
+### 延迟与排错
 
-优先检查电脑与手机之间的连接类型。电脑上运行 `tailscale ping <手机的 Tailscale IP>`，观察是否建立直连；`tailscale status` 也可查看活动连接的 direct/relay 信息。直连不代表一定快，仍需比较实际请求耗时。更多诊断方法与项目改进优先级见 [改进清单](docs/改进清单.md)。
+优先检查电脑与手机之间的连接类型。电脑上运行 `tailscale ping <手机的 Tailscale IP>`，观察是否建立直连；`tailscale status` 也可查看活动连接的 direct/relay 信息。直连不代表一定快，仍需比较实际请求耗时。NPS 或 frp 入口则分别检查服务器监听、客户端在线状态、目标服务与实际 HTTP/WebSocket 请求。
 
 模型响应等待与手机到电脑的网络等待是两段不同的链路。换公网入口不能直接解决模型服务商慢的问题；提高思考等级也不是网络加速方式。
 
 ## 5. 安全
 
 - **Token 即权限**：拿到地址+Token 就能批准你电脑上的命令，当密码保管。
-- Serve 限制为 Tailscale 私网访问，但不替代项目的 Token 校验。保留 Token 校验，不在分享链接、截图或公开日志中附带 Token；不要启用 Funnel 或将本地 4123 端口直接映射到公网。
+- 任何映射都不替代项目 Token 校验，不在分享链接、截图或公开日志中附带 Token。选择 Serve 时保持私网范围，不把同一入口误改为 Funnel 公网；选择 NPS/frp 时，由用户维护 HTTPS/WSS 和来源限制，不直接把本机 4123 裸露到公网。
 - `~/.codex/config.toml` 内含第三方中转明文 token，别外发该文件/截图。
 - 审批策略别设 `never`，否则远程控制等于放开。
 
@@ -201,6 +251,8 @@ tailscale status                    # 检查电脑和手机是否在线
 自动测试：`npm test`。Windows 隔离进程测试：`npm run test:writer-process`（临时配置目录、独立进程、不发送模型提示词，不操作现有会话）。
 
 ## 已验证
+
+下方为既有验证记录，不代表 NPS 公网流程已完整验收。本轮文档整理没有重新执行真实 Codex 任务、审批或移动端打包。
 
 新增回归验证：`npm test`（含思考等级、默认恢复与配置保存）；`npm run test:web` 使用系统 Edge 无头浏览器与隔离模拟 WebSocket，在 320、390、1280 像素宽度检查模型联动、思考设置、搜索、历史切换、流式归并、审批、停止、纠偏与安全渲染，不操作真实 Codex 会话。需要换浏览器通道时设置 `CODEXAPP_TEST_BROWSER`，且该通道的浏览器已安装。截图在被 Git 忽略的 `dist-check/web-ui/`。
 

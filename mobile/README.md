@@ -20,7 +20,7 @@
 3. 手机装 **Expo Go**（App Store / Play 商店），和电脑同一 WiFi：
    - iPhone：用相机扫终端里的二维码 → 在 Expo Go 打开
    - Android：用 Expo Go 内的扫码功能扫
-4. App 打开后：填**中继地址**（如 `http://192.168.1.84:4123`）+ **Token**，点连接。
+4. App 打开后选择 **「中继直连」**，填**中继地址**（如 `http://192.168.1.84:4123`）+ **Token**，点连接。此路线不需要注册云账号。
 
 > iPhone 和 Android 用的是**同一个中继地址 + Token**，跟网页端一样。
 
@@ -52,9 +52,11 @@ eas build -p ios --profile preview        # 出 iOS 包，需 Apple 开发者账
 
 新版设置支持按模型能力选择思考等级。选择「Codex 默认」恢复有效默认；能力未知时支持手动输入服务商等级。模型与等级一起保存到电脑中继或 Agent，从下一条提示词生效，不修改正在运行的任务。原生回复仍以可选择文本显示，网页的 Markdown 与浅深色选择不代表原生端也具备相同渲染。
 
-默认使用 **Tailscale Serve**，不启用 Funnel。电脑先运行中继 `npm start`，再运行 `tailscale serve --bg 4123`。首次启用按命令提示完成授权，确认输出 **`Available within your tailnet`**。从 Funnel 切换、启动和关闭方法见[根目录 README](../README.md#4-手机远程访问tailscale-serve)。
+远程入口由用户自选：NPS/NPC 为首推的公网映射方案，Tailscale Serve 可作为无需自有服务器的私网路线，具体安装和映射边界见 [根目录 README](../README.md#4-手机远程访问用户自选映射)。手机端不负责安装或启动映射工具，云账号模式继续保留。
 
-手机需要安装并开启 Tailscale，接入电脑所在的同一网络。在 App 中选择 **「中继直连」** 模式（旧版叫「局域网直连」），中继地址填写 Serve 输出的完整 HTTPS 域名，例如 `https://my-pc.tail123456.ts.net`（替换成实际域名，不加 `:4123`），再填写中继 Token；WebSocket 自动使用 `wss://`。手机保持 Tailscale 连接时，也可用浏览器打开同一地址。
+选择 NPS 或 frp 时，项目电脑的客户端将独立公网端口转发到本机中继。App 选择 **「中继直连」**，使用对应入口和该电脑自己的应用 Token，不使用 NPS vkey 或面板密码。公网 HTTP 只作临时联通测试，不保证原生端明文访问兼容性；正式任务应使用 HTTPS/WSS。
+
+选择 Tailscale 时，电脑先运行中继 `npm start`，再执行 `tailscale serve --bg 4123`；首次按提示授权，确认输出 `Available within your tailnet`。完整操作见 [Tailscale Serve](../README.md#tailscale-serve)。手机需要安装并开启 Tailscale，接入电脑所在的同一网络。在 App 中选择 **「中继直连」** 模式（旧版叫「局域网直连」），中继地址填写 Serve 输出的完整 HTTPS 域名，例如 `https://my-pc.tail123456.ts.net`（替换成实际域名，不加 `:4123`），再填写中继 Token；WebSocket 自动使用 `wss://`。手机保持 Tailscale 连接时，也可用浏览器打开同一地址。
 
 Serve 的 HTTPS 地址和 `100.x.x.x` 的 Tailscale IP 都不是普通公网入口。手机未接入 Tailscale 时无法访问，不需要等待 Funnel 的公网 DNS 生效。两端直连有机会降低延迟，无法直连时仍可能走中继。
 
