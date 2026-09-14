@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { historyImages } from "./imageInput.mjs";
 
 const recency = (t) => t.recencyAt ?? t.updatedAt ?? t.createdAt ?? 0;
 const lastSegment = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
@@ -109,7 +110,8 @@ export function itemToEvent(item) {
   const fields = {};
   switch (item.type) {
     case "userMessage":
-      text = (item.content || []).map((c) => c.type === "text" ? c.text : c.type === "image" || c.type === "localImage" ? "[图片] " + (c.path || c.url || "") : c.type === "skill" ? "[技能] " + (c.name || c.path || "") : c.type === "mention" ? "[引用] " + (c.name || c.path || "") : "").join("\n"); break;
+      if ((item.content || []).some(c => c.type === "image" || c.type === "localImage")) fields.images = historyImages(item.content);
+      text = (item.content || []).map((c) => c.type === "text" ? c.text : c.type === "localImage" ? "[图片] " + (c.path || "") : c.type === "skill" ? "[技能] " + (c.name || c.path || "") : c.type === "mention" ? "[引用] " + (c.name || c.path || "") : "").filter(Boolean).join("\n") || (fields.images?.length ? "[图片]" : ""); break;
     case "agentMessage": case "plan": text = item.text; break;
     case "reasoning": {
       const joined = (item.summary || []).join("\n"), summary = joined.trim() ? joined : "";

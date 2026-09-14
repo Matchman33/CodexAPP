@@ -20,6 +20,7 @@ import { listProjectTree, readThreadHistory, historyEvents } from "./threadDispl
 import { HistoryPager, HISTORY_LIMITS, trimRecent, boundEvent } from "./historyPaging.mjs";
 import { liveItemEvent, liveDeltaEvent, settleLiveEvents, completedTurnEvent } from "./liveEvents.mjs";
 import { PromptQueue } from "./promptQueue.mjs";
+import { normalizeImages, buildUserInput, imageEcho, IMAGE_LIMITS } from "./imageInput.mjs";
 import { SessionPermissions } from "./sessionPermissions.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -213,7 +214,7 @@ export class CodexBridge {
       getState: () => this.state,
       schedule: run => { const task = this.commandQueue.catch(() => {}).then(run); this.commandQueue = task; return task; },
       execute: async item => {
-        const result = await this._prompt(item.text, item.cwd, item.id);
+        const result = await this._prompt(item.text, item.cwd, item.id, item.images);
         if (this.state.readOnly) throw new Error("会话被占用，消息保留在队列中");
         return result;
       },
@@ -283,7 +284,8 @@ export class CodexBridge {
 
   snapshot() {
     return {
-      type: "hello",
+        type: "hello",
+        imageUpload: { supported: true, ...IMAGE_LIMITS },
       state: this.state,
       config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd, model: this.state.model, reasoningEffort: this.state.reasoningEffort },
       pendingApprovals: [...this.pendingApprovals.values()].map((v) => v.approval),
@@ -440,17 +442,18 @@ export class CodexBridge {
   async _dispatchCommand(m) {
     switch (m.type) {
       case "enqueuePrompt": {
+        const images = normalizeImages(m.images);
         if (!this.state.codexConnected) throw new Error("Codex 未连接");
         if (!this.state.threadId && !m.threadId) await this._ensureThread(m.cwd);
-        const receipt = this.promptQueue.enqueue({ requestId: m.requestId, threadId: m.threadId || this.state.threadId, text: String(m.text || "").trim(), cwd: m.cwd });
+        const receipt = this.promptQueue.enqueue({ requestId: m.requestId, threadId: m.threadId || this.state.threadId, text: String(m.text || "").trim(), cwd: m.cwd, images });
         this.emit({ type: "promptAccepted", ...receipt, queue: this.promptQueue.snapshot() });
         return;
       }
       case "cancelQueuedPrompt": return this.promptQueue.cancel(m.threadId, m.id);
       case "pauseQueue": return this.promptQueue.pause(m.threadId);
       case "resumeQueue": return this.promptQueue.resume(m.threadId);
-      case "prompt": return this._prompt(String(m.text || "").trim(), m.cwd);
-      case "steer": return this._steer(String(m.text || "").trim());
+      case "prompt": return this._prompt(String(m.text || "").trim(), m.cwd, m.requestId, m.images);
+      case "steer": return this._steer(String(m.text || "").trim(), m.images);
       case "interrupt": return this._interrupt(m.threadId, m.turnId);
       case "approval": return this._resolveApproval(m.key, m.optionId);
       case "newThread": return this._newThread(m.cwd, m.historyMode === "paged" || !!this.history);
@@ -489,8 +492,10 @@ export class CodexBridge {
     }
   }
 
-  async _prompt(text, cwd, echoId) {
-    if (!text) return;
+  async _prompt(text, cwd, echoId, images) {
+    images = normalizeImages(images);
+    if (!text && !images.length) return;
+    const input = buildUserInput(text, images);
     if (this.state.status === "running") throw new Error("当前任务未完成，请使用消息队列或纠偏");
     const model = await this.models.resolve(cwd || this.state.cwd);
     if (!await this._ensureThread(cwd, model)) return;
@@ -498,11 +503,11 @@ export class CodexBridge {
     const effort = await this.models.resolveEffort(cwd || this.state.cwd, model, this.state.effectiveReasoningEffort);
     const requested = this.permissions.selection();
     const policy = this.permissions.turnPolicy();
-    const params = { threadId: this.state.threadId, input: [{ type: "text", text, text_elements: [] }], approvalPolicy: requested.approvalPolicy, sandboxPolicy: policy };
+    const params = { threadId: this.state.threadId, input, approvalPolicy: requested.approvalPolicy, sandboxPolicy: policy };
     if (cwd) params.cwd = cwd;
     params.model = model;
     params.effort = effort;
-    const echo = this._pushEvent({ kind: "user", text, inputEcho: true, ...(echoId ? { id: echoId } : {}) });
+    const echo = this._pushEvent({ kind: "user", text: text || "[图片]", ...(images.length ? { images: imageEcho(images, true) } : {}), inputEcho: true, ...(echoId ? { id: echoId } : {}) });
     const permissionRevision = this.permissions.revision;
     const res = await this.codex.request("turn/start", params);
     this.permissions.acceptedTurn(requested, policy, permissionRevision);
@@ -515,10 +520,12 @@ export class CodexBridge {
     this._broadcastState();
     return { threadId: this.state.threadId, turnId: res?.turn?.id || res?.id || null };
   }
-  async _steer(text) {
+  async _steer(text, images) {
+    images = normalizeImages(images);
+    const input = buildUserInput(text, images);
     if (!this.state.threadId || !this.state.turnId) throw new Error("没有进行中的任务可纠偏");
-    this._pushEvent({ kind: "user", text: "↪ " + text });
-    await this.codex.request("turn/steer", { threadId: this.state.threadId, expectedTurnId: this.state.turnId, input: [{ type: "text", text, text_elements: [] }] });
+    this._pushEvent({ kind: "user", text: "↪ " + (text || "[图片]"), ...(images.length ? { images: imageEcho(images, true) } : {}) });
+    await this.codex.request("turn/steer", { threadId: this.state.threadId, expectedTurnId: this.state.turnId, input });
   }
   async _interrupt(threadId = this.state.threadId, turnId = this.state.turnId) {
     this.promptQueue.pause(threadId, "任务已请求停止，队列暂停");

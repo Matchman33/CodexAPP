@@ -21,6 +21,7 @@ import { listProjectTree, readThreadHistory, historyEvents } from "../core/threa
 import { HistoryPager, HISTORY_LIMITS, trimRecent, boundEvent } from "../core/historyPaging.mjs";
 import { liveItemEvent, liveDeltaEvent, settleLiveEvents, completedTurnEvent } from "../core/liveEvents.mjs";
 import { PromptQueue } from "../core/promptQueue.mjs";
+import { normalizeImages, buildUserInput, imageEcho, IMAGE_LIMITS } from "../core/imageInput.mjs";
 import { SessionPermissions } from "../core/sessionPermissions.mjs";
 import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 
@@ -242,7 +243,7 @@ const promptQueue = new PromptQueue({
   getState: () => state,
   schedule: run => { const task = commandQueue.catch(() => {}).then(run); commandQueue = task; return task; },
   execute: async item => {
-    const result = await startTurn(item.text, item.cwd, item.id);
+    const result = await startTurn(item.text, item.cwd, item.id, item.images);
     if (state.readOnly) throw new Error("会话被占用，消息保留在队列中");
     return result;
   },
@@ -542,8 +543,10 @@ async function ensureThread(cwd, model) {
   return state.threadId;
 }
 
-async function startTurn(text, cwd, echoId) {
-  if (!text) return;
+async function startTurn(text, cwd, echoId, images) {
+  images = normalizeImages(images);
+  if (!text && !images.length) return;
+  const input = buildUserInput(text, images);
   if (state.status === "running") throw new Error("当前任务未完成，请使用消息队列或纠偏");
   const model = await models.resolve(cwd || state.cwd);
   if (!await ensureThread(cwd, model)) return;
@@ -552,7 +555,7 @@ async function startTurn(text, cwd, echoId) {
   const requested = permissions.selection(), policy = permissions.turnPolicy();
   const params = {
     threadId: state.threadId,
-    input: [{ type: "text", text, text_elements: [] }],
+    input,
     // 每轮显式传入用户选择，避免已有会话沿用旧审批策略。
     approvalPolicy: requested.approvalPolicy,
     sandboxPolicy: policy,
@@ -560,7 +563,7 @@ async function startTurn(text, cwd, echoId) {
   if (cwd) params.cwd = cwd;
   params.model = model;
   params.effort = effort;
-  const echo = pushEvent({ kind: "user", text, inputEcho: true, ...(echoId ? { id: echoId } : {}) });
+  const echo = pushEvent({ kind: "user", text: text || "[图片]", ...(images.length ? { images: imageEcho(images, true) } : {}), inputEcho: true, ...(echoId ? { id: echoId } : {}) });
   const permissionRevision = permissions.revision;
   const res = await codex.request("turn/start", params);
   permissions.acceptedTurn(requested, policy, permissionRevision);
@@ -574,13 +577,15 @@ async function startTurn(text, cwd, echoId) {
   return { threadId: state.threadId, turnId: res?.turn?.id || res?.id || null };
 }
 
-async function steerTurn(text) {
+async function steerTurn(text, images) {
+  images = normalizeImages(images);
+  const input = buildUserInput(text, images);
   if (!state.threadId || !state.turnId) throw new Error("没有进行中的任务可纠偏");
-  pushEvent({ kind: "user", text: "↪ " + text });
+  pushEvent({ kind: "user", text: "↪ " + (text || "[图片]"), ...(images.length ? { images: imageEcho(images, true) } : {}) });
   await codex.request("turn/steer", {
     threadId: state.threadId,
     expectedTurnId: state.turnId,
-    input: [{ type: "text", text, text_elements: [] }],
+    input,
   });
 }
 
@@ -734,7 +739,7 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+const wss = new WebSocketServer({ server: httpServer, path: "/ws", maxPayload: 8 * 1048576 });
 const clients = new Set();
 let commandQueue = Promise.resolve();
 
@@ -756,6 +761,7 @@ function schedulePermissions() {
 function snapshot() {
   return {
     type: "hello",
+    imageUpload: { supported: true, ...IMAGE_LIMITS },
     state,
     config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd, model: state.model, reasoningEffort: state.reasoningEffort },
     pendingApprovals: [...pendingApprovals.values()].map((v) => v.approval),
@@ -775,6 +781,7 @@ wss.on("connection", (ws, req) => {
     return;
   }
   clients.add(ws);
+  ws.on("error", () => {});
   if (url.searchParams.get("history") === "paged") {
     history ||= { paged: true, nextCursor: null };
     const bounded = eventLog.map(e => boundEvent(e, historyPager));
@@ -799,9 +806,10 @@ wss.on("connection", (ws, req) => {
       try {
         switch (m.type) {
           case "enqueuePrompt": {
+            const images = normalizeImages(m.images);
             if (!state.codexConnected) throw new Error("Codex 未连接");
             if (!state.threadId && !m.threadId) await ensureThread(m.cwd);
-            const receipt = promptQueue.enqueue({ requestId: m.requestId, threadId: m.threadId || state.threadId, text: String(m.text || "").trim(), cwd: m.cwd });
+            const receipt = promptQueue.enqueue({ requestId: m.requestId, threadId: m.threadId || state.threadId, text: String(m.text || "").trim(), cwd: m.cwd, images });
             send(ws, { type: "promptAccepted", ...receipt, queue: promptQueue.snapshot() });
             break;
           }
@@ -809,10 +817,10 @@ wss.on("connection", (ws, req) => {
           case "pauseQueue": promptQueue.pause(m.threadId); break;
           case "resumeQueue": promptQueue.resume(m.threadId); break;
           case "prompt":
-            await startTurn(String(m.text || "").trim(), m.cwd);
+            await startTurn(String(m.text || "").trim(), m.cwd, m.requestId, m.images);
             break;
           case "steer":
-            await steerTurn(String(m.text || "").trim());
+            await steerTurn(String(m.text || "").trim(), m.images);
             break;
           case "interrupt":
             await interruptTurn(m.threadId, m.turnId);

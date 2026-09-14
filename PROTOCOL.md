@@ -18,7 +18,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 | type | 字段 | 说明 |
 |---|---|---|
-| `hello` | `state`, `config`, `pendingApprovals[]`, `recentEvents[]`, `history?`, `requestId?` | 连接快照；分页模式仅携带有限近期记录 |
+| `hello` | `state`, `config`, `pendingApprovals[]`, `recentEvents[]`, `history?`, `requestId?`, `imageUpload?` | 连接快照；分页模式仅携带有限近期记录；图片能力按后端声明启用 |
 | `historyPage` | `threadId`, `events[]`, `nextCursor`, `requestId` | 按时间正序排列的一页历史；游标继续读取更早记录 |
 | `historyItem` | `threadId`, `itemId?`, `text`, `offset`, `textLength`, `nextOffset`, `detailCursor`, `requestId` | 历史长文本的一个内容片段 |
 | `state` | `state` | 状态变化 |
@@ -91,10 +91,31 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ## 客户端 → 服务端
 
+### 图片输入
+
+`hello.imageUpload` 为 `{ supported:true, count:4, bytes:1048576, totalBytes:4194304, previewBytes:8192, queueChars:25165824 }`。未声明能力的旧后端不应接收图片请求；前端禁用选图，不影响文字消息。
+
+`prompt`、`enqueuePrompt`、`steer` 的可选 `images` 形如：
+
+```jsonc
+{
+  "text": "分析截图",
+  "images": [
+    { "name": "capture.png", "dataUrl": "data:image/png;base64,...", "previewDataUrl": "data:image/jpeg;base64,..." }
+  ]
+}
+```
+
+图片只接受 PNG、JPEG、WebP 的完整 Base64 Data URL，后端校验声明格式与文件头、Base64 及解码字节数；不接受 URL、电脑路径或任意文件读取请求。每条消息最多 4 张、单图最多 1 MiB、总计最多 4 MiB；可选缩略图最多 8 KiB。文字可以为空，但文字和图片不能同时为空。输入映射到 Codex 的 `{type:"image",url:dataUrl}`；文件名和缩略图不进入模型输入。
+
+等待队列原图和缩略图的 Data URL 字符总计不超过 24 MiB；该值是字符串容量，不是原图解码字节总数。直连入站帧上限 8 MiB，Broker 的加密信封入站帧上限 12 MiB。Broker 只转发密文，Agent 解密后再次执行相同的图片校验。
+
+用户事件及队列快照的 `images` 为 `[{id,name,url?}]`，`id` 来自原图 Data URL 的 SHA-256，`url` 仅是缩略图，没有原图 `dataUrl`。历史分页的 65536 字符预算包含缩略图字符串；原图 Base64 不拼到用户消息文本中。经本功能上传的缩略图缓存在电脑的 Codex 用户目录，历史用原图身份恢复；不属于此缓存的附件显示占位。
+
 | type | 字段 | 说明 |
 |---|---|---|
-| `prompt` | `text`, `cwd?` | 发提示词，开始一个新 turn（无会话则自动新建） |
-| `steer` | `text` | 纠偏：往当前进行中的 turn 插话 |
+| `prompt` | `text`, `cwd?`, `images[]?`, `requestId?` | 发提示词，开始一个新 turn（无会话则自动新建）；图片非空时文字可为空 |
+| `steer` | `text`, `images[]?` | 纠偏：往当前进行中的 turn 插话；支持图片 |
 | `interrupt` | `threadId?`, `turnId?` | 中断指定或当前任务；后端向 Codex 传齐两个 ID |
 | `approval` | `key`, `optionId` | 回传审批决策（`optionId` ∈ approve/approveSession/deny） |
 | `newThread` | `cwd?` | 新建会话 |
@@ -113,7 +134,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 列表读取所有模型提供商的非归档交互会话，遍历分页并按会话 ID 去重。新版项目 ID 由 `local-projects` 解析，显式 `thread-project-assignments` 优先于路径匹配，兼容旧版目录格式、多个工作根目录和工作区提示。未分配的会话保留在对话组，不再静默丢弃。
 
-打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。新版网页启用下方的历史分页模式；未传 `historyMode` 的旧客户端保留完整历史读取兼容路径。历史包含文本、附件路径、计划、推理摘要和工具结果，图片本体暂不通过中继传输。事件可附带 `itemId`、`threadId`、`turnId`、`phase`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
+打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。新版网页启用下方的历史分页模式；未传 `historyMode` 的旧客户端保留完整历史读取兼容路径。历史包含文本、附件路径、计划、推理摘要和工具结果；经图片上传功能发送的附件可恢复缩略图，原图不作为历史文本传输，也不自动读取其他本地图片路径或下载远程地址。事件可附带 `itemId`、`threadId`、`turnId`、`phase`、`images`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
 
 ### 历史分页与缓存
 
@@ -184,7 +205,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 | type | 字段 | 说明 |
 |---|---|---|
-| enqueuePrompt | text, threadId?, cwd?, requestId | 将普通消息排入当前会话；仅无当前会话时允许省略会话 ID 并自动新建 |
+| enqueuePrompt | text, threadId?, cwd?, requestId, images[]? | 将图文或纯图片消息排入当前会话；仅无当前会话时允许省略会话 ID 并自动新建 |
 | cancelQueuedPrompt | threadId, id, requestId? | 取消尚未开始的消息，启动中消息需使用停止任务 |
 | pauseQueue | threadId, requestId? | 暂停该会话后续消息，不中断当前任务 |
 | resumeQueue | threadId, requestId? | 手动继续当前会话队列；运行中的任务仍需先完成 |
@@ -193,7 +214,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 队列变化广播 type:"promptQueue"、queue；入队受理回传 type:"promptAccepted"、id、requestId、threadId、queue。后端先登记受理凭据再调度执行；受理不代表任务成功。错误沿用 type:"error" 并回传原 requestId。客户端应匹配自己的请求 ID 后清空对应草稿，不能把其他客户端的确认当成自己的发送确认。
 
-请求 ID 须为 1～160 个 ASCII 字母、数字或下划线、点、冒号、连字符。同 ID、同会话、同文本和同 cwd 的重试返回原凭据；变更内容则报错。保留最近 200 个凭据并保护等待及执行中的请求，已取消消息的重试也不会恢复入队。该窗口是有限的，不支持跨后端重启的幂等；网页不会自动重发未确认消息。
+请求 ID 须为 1～160 个 ASCII 字母、数字或下划线、点、冒号、连字符。同 ID、同会话、同文本、同 cwd 和同图片内容的重试返回原凭据；变更内容（含原图、名称或缩略图）则报错。保留最近 200 个凭据并保护等待及执行中的请求，已取消消息的重试也不会恢复入队。该窗口是有限的，不支持跨后端重启的幂等；网页不会自动重发未确认消息。
 
 队列仅存电脑端后端内存，关闭网页后继续保留，服务重启清空。全会话合计上限为 20 条、262144 字符，单条上限为 65536 字符，字符按 JavaScript UTF-16 长度计。等待消息按原会话 FIFO 执行，仅 turn.status 为 completed 才自动推进；中断、失败、未知状态、写入占用或 Codex 断连均暂停队列。切换会话会暂停原会话队列，只能在重新打开原会话后手动继续。消息开始执行时使用当时的模型、思考等级和审批策略。
 

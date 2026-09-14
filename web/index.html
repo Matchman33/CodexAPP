@@ -144,8 +144,11 @@
         <button id="interruptBtn" class="icon-btn stop-btn" aria-label="停止当前任务" title="停止当前任务"><i data-lucide="square"></i></button>
       </div>
       <div class="composer-box">
+        <div id="imageDrafts" class="image-drafts hidden" aria-label="待发送图片"></div>
+        <input id="imageInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" multiple />
         <textarea id="input" rows="1" placeholder="发送消息" aria-label="消息"></textarea>
         <div class="composer-tools">
+          <button id="attachImageBtn" class="icon-btn" title="添加图片" aria-label="添加图片"><i data-lucide="image-plus"></i></button>
           <button id="effortBtn" class="effort-trigger" title="选择思考等级"><i data-lucide="sliders-horizontal"></i><span id="effortLabel">默认思考</span></button>
           <label class="steer-toggle" title="向正在运行的任务补充指令"><input type="checkbox" id="steerMode" role="switch" />纠偏</label>
           <button id="sendBtn" class="icon-btn send-btn" aria-label="发送消息" title="发送消息"><i data-lucide="arrow-up"></i></button>
@@ -249,6 +252,8 @@
   <script src="e2e.js"></script>
   <script src="vendor/chat-ui.js"></script>
   <script src="history-feed.js"></script>
+  <dialog id="imageDialog" class="image-dialog" aria-label="图片预览"><button class="icon-btn" type="button" aria-label="关闭图片预览" title="关闭图片预览"><i data-lucide="x"></i></button><img alt="图片" /></dialog>
+  <script src="image-attachments.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -125,12 +125,26 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .prompt-status:has(> span:empty):has(> button.hidden) { display: none; }
 .composer-box { border: 1px solid var(--line); background: var(--bg); border-radius: 26px; padding: 12px; box-shadow: 0 2px 6px #00000005; }
 .composer-box:focus-within { border-color: var(--muted); }
+.composer-box.drag-over { border-color: var(--accent); outline: 2px solid var(--accent); }
+.image-drafts, .message-photos { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 8px; min-width: 0; max-width: 100%; }
+.image-draft { position: relative; flex: 0 0 80px; padding-top: 4px; }
+.photo-preview { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 0; width: 80px; height: 80px; flex: 0 0 80px; overflow: hidden; background: var(--bg2); }
+.photo-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.image-remove.icon-btn { position: absolute; top: 0; right: 0; width: 24px; height: 24px; padding: 4px; background: var(--bg); border: 1px solid var(--line); }
+.image-placeholder { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.message-photos { flex-wrap: wrap; overflow-x: visible; }
+.image-dialog { padding: 40px 12px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+.image-dialog::backdrop { background: #00000099; }
+.image-dialog > button { position: absolute; top: 0; right: 0; }
+.image-dialog > img { display: block; max-width: min(100%, 1000px); max-height: calc(100dvh - 90px); object-fit: contain; }
 .composer textarea:focus-visible { outline: none; }
 .composer textarea { display: block; background: transparent; resize: none; border: none; padding: 2px 4px 10px; max-height: 160px; min-height: 32px; line-height: 1.5; border-radius: 0; }
-.composer-tools { display: flex; gap: 12px; align-items: center; min-height: 36px; }
+.composer-tools { display: flex; gap: 6px; align-items: center; min-height: 36px; }
 .effort-trigger { display: flex; gap: 6px; align-items: center; background: transparent; border: 0; padding: 6px 4px; font-size: 12px; color: var(--muted); min-width: 0; }
 .effort-trigger svg { width: 17px; height: 17px; }
 .effort-trigger span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 140px; }
+.composer-tools .effort-trigger { flex: 1; }
+@media (max-width: 430px) { .composer-tools .effort-trigger span { max-width: 65px; } .composer-tools > .icon-btn { width: 36px; flex-basis: 36px; padding: 8px; } }
 .send-btn { margin-left: auto; width: 36px; height: 36px; flex-basis: 36px; padding: 8px; background: var(--text); color: var(--bg); }
 .send-btn:hover { background: var(--text); opacity: .8; }
 .running-bar { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 6px; }

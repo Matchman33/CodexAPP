@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { normalizeImages, imageEcho, IMAGE_LIMITS } from "./imageInput.mjs";
 
 export const QUEUE_LIMITS = { items: 20, text: 65536, totalChars: 262144, receipts: 200 };
 
@@ -16,14 +17,15 @@ export class PromptQueue {
   }
   snapshot(threadId = this.getState().threadId) {
     const bucket = this.threads.get(threadId);
-    return { supported: true, threadId, paused: bucket?.paused || false, reason: bucket?.reason || "", items: (bucket?.items || []).map(item => ({ ...item, status: this.active?.id === item.id ? "starting" : "queued" })), activeId: this.active?.threadId === threadId ? this.active.id : null, acceptedRequestIds: [...this.receipts.keys()], limit: QUEUE_LIMITS.items };
+    return { supported: true, threadId, paused: bucket?.paused || false, reason: bucket?.reason || "", items: (bucket?.items || []).map(item => ({ ...item, ...(item.images ? { images: imageEcho(item.images) } : {}), status: this.active?.id === item.id ? "starting" : "queued" })), activeId: this.active?.threadId === threadId ? this.active.id : null, acceptedRequestIds: [...this.receipts.keys()], limit: QUEUE_LIMITS.items };
   }
   changed() { this.onChange(this.snapshot()); }
-  enqueue({ requestId, threadId, text, cwd }) {
+  enqueue({ requestId, threadId, text, cwd, images }) {
     if (typeof requestId !== "string" || !/^[a-zA-Z0-9_.:-]{1,160}$/.test(requestId)) throw new Error("消息请求 ID 无效");
-    if (typeof text !== "string" || !text.trim() || text.length > QUEUE_LIMITS.text) throw new Error("消息为空或超过 65536 字符");
+    images = normalizeImages(images);
+    if (typeof text !== "string" || (!text.trim() && !images.length) || text.length > QUEUE_LIMITS.text) throw new Error("消息为空或超过 65536 字符");
     if (cwd !== undefined && (typeof cwd !== "string" || cwd.length > 4096)) throw new Error("工作目录无效");
-    const signature = crypto.createHash("sha256").update(JSON.stringify([threadId, text, cwd])).digest("hex");
+    const signature = crypto.createHash("sha256").update(JSON.stringify([threadId, text, cwd, images])).digest("hex");
     const existing = this.receipts.get(requestId);
     if (existing) {
       if (existing.signature !== signature) throw new Error("同一请求 ID 不能用于不同消息");
@@ -32,7 +34,9 @@ export class PromptQueue {
     if (!threadId || threadId !== this.getState().threadId) throw new Error("消息只能排入当前会话");
     const allItems = [...this.threads.values()].flatMap(bucket => bucket.items);
     if (allItems.length >= QUEUE_LIMITS.items || allItems.reduce((n, item) => n + item.text.length, 0) + text.length > QUEUE_LIMITS.totalChars) throw new Error("待执行队列已满，请先取消消息或等待执行");
-    const item = { id: requestId, requestId, threadId, text, cwd };
+    const payloadChars = list => list.reduce((n, image) => n + image.dataUrl.length + (image.previewDataUrl || "").length, 0);
+    if (allItems.reduce((n, item) => n + payloadChars(item.images || []), 0) + payloadChars(images) > IMAGE_LIMITS.queueChars) throw new Error("队列图片容量已满，请等待执行或取消部分消息");
+    const item = { id: requestId, requestId, threadId, text, cwd, ...(images.length ? { images } : {}) };
     this.bucket(threadId).items.push(item);
     const receipt = { id: item.id, requestId, threadId };
     this.receipts.set(requestId, { signature, receipt });

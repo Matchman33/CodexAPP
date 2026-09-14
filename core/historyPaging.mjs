@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { itemToEvent } from "./threadDisplay.mjs";
+import { imageChars } from "./imageInput.mjs";
 
 export const HISTORY_LIMITS = { events: 50, chars: 65536, itemChars: 8192, turns: 8, recent: 100 };
 
@@ -81,10 +82,10 @@ export class HistoryPager {
         const item = items[i], event = itemToEvent(item);
         if (!event) continue;
         const text = event.text.slice(0, HISTORY_LIMITS.itemChars);
-        if (events.length >= HISTORY_LIMITS.events || (events.length && chars + text.length > HISTORY_LIMITS.chars)) break;
+        if (events.length >= HISTORY_LIMITS.events || (events.length && chars + text.length + imageChars(event) > HISTORY_LIMITS.chars)) break;
         const detailCursor = this.encode({ threadId, turnId: t.id, turnCursor: state.turnCursor, itemCursor: state.itemCursor, itemId: item.id });
         events.push({ ...event, text, textLength: event.text.length, truncated: text.length < event.text.length, detailCursor, id: [threadId, t.id, item.id].join(":"), threadId, turnId: t.id, ts: (t.startedAt || 0) * 1000 });
-        chars += text.length;
+        chars += text.length + imageChars(event);
       }
       if (i < items.length) { state.skip = i; state.skipAfter = i > 0 ? items[i - 1].id : null; break; }
       if (p.nextCursor) { state.itemCursor = p.nextCursor; state.skip = 0; state.skipAfter = null; continue; }

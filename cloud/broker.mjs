@@ -428,11 +428,12 @@ const server = useTls
   : http.createServer(requestHandler);
 
 // ---- WebSocket link ----
-const wss = new WebSocketServer({ server, path: "/link" });
+const wss = new WebSocketServer({ server, path: "/link", maxPayload: 12 * 1048576 });
 
 function sendJson(ws, obj) { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); }
 
 wss.on("connection", (ws) => {
+  ws.on("error", () => {});
   ws.accountId = null; ws.role = null;
 
   ws.on("message", (raw) => {

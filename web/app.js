@@ -41,6 +41,8 @@ const historyClientId = "history-" + Math.random().toString(36).slice(2);
 let lastSelectionId = null;
 let requestedPagedMode = false;
 let promptQueueState = null;
+let imageUploadSupported = false;
+let pendingDirect = null;
 let pendingPrompt = null;
 let promptTimer = null;
 let queueExpanded = true;
@@ -500,6 +502,7 @@ function handle(m) {
       writerPending = null; writerConflict = null;
       $("writerSheet").classList.add("hidden");
       appState = m.state || {};
+      imageUploadSupported = !!m.imageUpload?.supported;
       promptQueueState = m.promptQueue?.supported ? m.promptQueue : null;
       if (pendingPrompt && promptQueueState?.acceptedRequestIds?.includes(pendingPrompt.requestId)) acceptPrompt(pendingPrompt.requestId);
       else if (pendingPrompt) pendingPrompt.waiting = false;
@@ -565,6 +568,10 @@ function handle(m) {
     case "event":
       if (pendingSelection || (m.event.threadId && m.event.threadId !== appState.threadId)) break;
       if (m.event.kind?.startsWith("item:") && m.event.turnId && appState.turnId && m.event.turnId !== appState.turnId) break;
+      if (m.event.kind === "user" && pendingDirect?.requestId === m.event.id) {
+        if (input.value.trim() === pendingDirect.text) input.value = "";
+        attachments.clear(pendingDirect.imageIds); pendingDirect = null; input.style.height = "auto"; updateComposer();
+      }
       if (!promptQueueState?.supported && m.event.kind === "user" && (input.value.trim() === m.event.text || (m.event.truncated && input.value.trim().length === m.event.textLength && input.value.trim().startsWith(m.event.text)))) { input.value = ""; input.style.height = "auto"; updateComposer(); }
       renderEvent(m.event);
       scrollFeed();
@@ -745,7 +752,7 @@ function showCachedHistory(bottom = followLatest) {
   for (const e of events) {
     if (!e.inputEcho || !e.turnId) continue;
     const candidates = usersByTurn.get(JSON.stringify([e.threadId, e.turnId])) || [];
-    const saved = candidates.find(saved => (saved.textOffset || 0) === 0 && (saved.textLength ?? saved.text.length) === (e.textLength ?? e.text.length) && (saved.text.startsWith(e.text) || e.text.startsWith(saved.text)));
+    const saved = candidates.find(saved => (saved.textOffset || 0) === 0 && (saved.textLength ?? saved.text.length) === (e.textLength ?? e.text.length) && (saved.text.startsWith(e.text) || e.text.startsWith(saved.text)) && JSON.stringify((saved.images || []).map(i => i.id)) === JSON.stringify((e.images || []).map(i => i.id)));
     if (saved) replaced.set(e.id, saved);
   }
   // Replace the echo's identity in place so it remains an ordering anchor across page boundaries.
@@ -829,6 +836,11 @@ function labelFor(kind) {
 
 function setEventText(div, e) {
   const body = div.querySelector(".body");
+  let photos = div.querySelector(".message-photos");
+  if (e.kind === "user" && e.images?.length) {
+    if (!photos) { photos = document.createElement("div"); photos.className = "message-photos"; body.before(photos); }
+    if (photos._images !== e.images) { window.ImageAttachments.gallery(photos, e.images); photos._images = e.images; }
+  } else photos?.remove();
   div._event = e;
   if (!e.live) delete div.dataset.previewMode;
   const head = !!e.live && div.dataset.previewMode === "head" && e.headText !== undefined;
@@ -1038,10 +1050,33 @@ $("enableNotif").onclick = async () => {
 // Composer: send / steer / interrupt
 // ---------------------------------------------------------------------------
 const input = $("input");
+const attachments = new window.ImageAttachments(() => updateComposer());
+async function addImages(files) {
+  if (attachments.locked || attachments.busy) return;
+  if (!imageUploadSupported) { $("promptStatus").textContent = "当前中继不支持图片，请更新并重启电脑端服务"; return; }
+  try { await attachments.add(files); $("promptStatus").textContent = ""; }
+  catch (error) { $("promptStatus").textContent = error.message; }
+}
+$("attachImageBtn").onclick = () => $("imageInput").click();
+$("imageInput").onchange = async () => { const files = Array.from($("imageInput").files); $("imageInput").value = ""; await addImages(files); };
+input.addEventListener("paste", event => {
+  const files = Array.from(event.clipboardData?.items || []).filter(item => item.kind === "file").map(item => item.getAsFile()).filter(Boolean);
+  if (files.length) { event.preventDefault(); addImages(files); }
+});
+const dropZone = document.querySelector(".composer-box");
+dropZone.addEventListener("dragover", event => { if (Array.from(event.dataTransfer?.types || []).includes("Files")) { event.preventDefault(); dropZone.classList.add("drag-over"); } });
+dropZone.addEventListener("dragleave", event => { if (!dropZone.contains(event.relatedTarget)) dropZone.classList.remove("drag-over"); });
+dropZone.addEventListener("drop", event => { event.preventDefault(); dropZone.classList.remove("drag-over"); addImages(event.dataTransfer.files); });
+$("imageDialog").querySelector("button").onclick = () => $("imageDialog").close();
+$("imageDialog").addEventListener("close", () => $("imageDialog").querySelector("img").removeAttribute("src"));
+$("imageDialog").addEventListener("click", event => { if (event.target === $("imageDialog")) $("imageDialog").close(); });
 function updateComposer() {
   const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN && appState.codexConnected) && (profile.mode !== "cloud" || (!!agentPub && paired));
   const blocked = appState.status === "running" && !$("steerMode").checked && !promptQueueState?.supported;
-  $("sendBtn").disabled = !connected || !$("input").value.trim() || blocked || !!pendingSelection || !!pendingPrompt;
+  $("sendBtn").disabled = !connected || (!$("input").value.trim() && !attachments.items.length) || blocked || !!pendingSelection || !!pendingPrompt || attachments.busy || (attachments.items.length > 0 && !imageUploadSupported);
+  const locked = !!pendingPrompt || !!pendingSelection;
+  if (attachments.locked !== locked) { attachments.locked = locked; attachments.render(); }
+  $("attachImageBtn").disabled = !imageUploadSupported || locked || attachments.busy || attachments.items.length >= 4;
   $("steerMode").disabled = !!pendingPrompt;
   const queueSend = promptQueueState?.supported && !$("steerMode").checked && (appState.status === "running" || promptQueueState.paused || promptQueueState.items.length > 0);
   const sendLabel = queueSend ? "加入队列" : "发送消息";
@@ -1062,15 +1097,18 @@ input.addEventListener("input", () => {
 
 function sendPrompt() {
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !attachments.items.length) return;
   if ($("sendBtn").disabled) return;
   const steer = $("steerMode").checked;
+  const images = attachments.take(), imageIds = attachments.items.map(item => item.id);
   if (!steer && promptQueueState?.supported) {
-    pendingPrompt = { type: "enqueuePrompt", text, threadId: appState.threadId || null, requestId: "prompt-" + newClientId(), waiting: true };
+    pendingPrompt = { type: "enqueuePrompt", text, ...(images.length ? { images } : {}), imageIds, threadId: appState.threadId || null, requestId: "prompt-" + newClientId(), waiting: true };
     submitQueuedPrompt(); return;
   }
-  if (!sendWs(steer ? { type: "steer", text } : { type: "prompt", text })) return;
-  if (!appState.readOnly) input.value = "";
+  const requestId = "prompt-direct-" + newClientId();
+  if (!sendWs({ type: steer ? "steer" : "prompt", text, requestId, ...(images.length ? { images } : {}) })) return;
+  pendingDirect = { requestId, text, imageIds };
+  if (!appState.readOnly) { input.value = ""; attachments.clear(imageIds); }
   input.style.height = "auto";
   updateComposer();
 }
@@ -1079,7 +1117,7 @@ $("sendBtn").onclick = sendPrompt;
 function submitQueuedPrompt() {
   if (!pendingPrompt) return;
   pendingPrompt.waiting = true;
-  const { waiting, ...message } = pendingPrompt;
+  const { waiting, imageIds, ...message } = pendingPrompt;
   if (!sendWs(message)) { pendingPrompt.waiting = false; updateComposer(); return; }
   $("promptStatus").textContent = "等待受理…";
   clearTimeout(promptTimer);
@@ -1090,6 +1128,7 @@ function acceptPrompt(requestId) {
   if (!pendingPrompt || pendingPrompt.requestId !== requestId) return;
   clearTimeout(promptTimer);
   if (input.value.trim() === pendingPrompt.text) { input.value = ""; input.style.height = "auto"; }
+  attachments.clear(pendingPrompt.imageIds || []);
   pendingPrompt = null; $("promptStatus").textContent = ""; updateComposer();
 }
 function receivePromptQueue(queue) {
@@ -1115,7 +1154,7 @@ function renderPromptQueue() {
   for (const [index, item] of (queue?.items || []).entries()) {
     const row = document.createElement("li"); row.dataset.queueId = item.id;
     const position = document.createElement("span"); position.className = "queue-position"; position.textContent = String(index + 1);
-    const text = document.createElement("span"); text.className = "queue-message"; text.textContent = (item.status === "starting" ? "启动中 · " : "") + item.text;
+    const text = document.createElement("span"); text.className = "queue-message"; text.textContent = (item.status === "starting" ? "启动中 · " : "") + (item.text || "图片消息") + (item.images?.length ? " · " + item.images.length + " 张图片" : "");
     if (item.status === "starting") text.classList.add("queue-starting");
     const cancel = document.createElement("button"); cancel.className = "icon-btn"; cancel.title = "取消排队消息"; cancel.setAttribute("aria-label", cancel.title); cancel.innerHTML = '<i data-lucide="x"></i>';
     cancel.disabled = item.status !== "queued" || !sessionReady;
