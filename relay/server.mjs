@@ -14,7 +14,7 @@ import crypto from "node:crypto";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
-import { resolveCodexBin } from "../core/codexBridge.mjs";
+import { resolveCodexBin } from "../core/codexBinary.mjs";
 import { ModelSettings, persistModel } from "../core/modelSettings.mjs";
 import { WriterControl, isWriterConflict } from "../core/writerControl.mjs";
 import { listProjectTree, readThreadHistory, historyEvents } from "../core/threadDisplay.mjs";
@@ -125,6 +125,7 @@ function pushEvent(entry) {
 // ---------------------------------------------------------------------------
 class CodexClient {
   constructor(bin) {
+    this.configuredBin = bin;
     this.bin = bin;
     this.nextId = 1;
     this.pending = new Map(); // id -> {resolve, reject}
@@ -135,6 +136,10 @@ class CodexClient {
   }
 
   start() {
+    const bin = resolveCodexBin(this.configuredBin);
+    if (!bin) throw new Error("未找到可用 Codex；桌面端版本需包含完整配套文件，请更新或修复安装，或配置独立 CLI 路径");
+    if (bin !== this.bin) console.log("[codex] selected binary:", bin);
+    this.bin = bin;
     this.child = spawn(this.bin, ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -940,23 +945,8 @@ wss.on("connection", (ws, req) => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-// Codex binary auto-detection (cross-platform) is shared from core/codexBridge.mjs.
+// 每次启动控制子进程重新选择可用版本，不将自动路径写回配置。
 async function main() {
-  const bin = resolveCodexBin(config.codexBin);
-  if (!bin) {
-    console.error("[fatal] 未找到 codex 可执行文件。请在 codexapp.config.json 设置 codexBin(或确保 codex 在 PATH 上)");
-    process.exit(1);
-  }
-  if (bin !== config.codexBin) {
-    console.log("[codex] auto-detected bin:", bin);
-    config.codexBin = bin;
-    codex.bin = bin;
-    try {
-      const c = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-      c.codexBin = bin;
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(c, null, 2));
-    } catch {}
-  }
   codex.start();
   await bootstrapCodex();
   await sleepPrevention.start();

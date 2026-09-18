@@ -10,7 +10,6 @@
 // with inbound client commands (prompt/steer/approval/...). The messages are
 // exactly the protocol in PROTOCOL.md — the transport never interprets them.
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -23,66 +22,17 @@ import { PromptQueue } from "./promptQueue.mjs";
 import { normalizeImages, buildUserInput, imageEcho, IMAGE_LIMITS } from "./imageInput.mjs";
 import { SessionPermissions } from "./sessionPermissions.mjs";
 import { ThreadLifecycle, restartIdleCodex } from "./threadLifecycle.mjs";
+import { resolveCodexBin } from "./codexBinary.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
 
-// Locate the `codex` binary across OSes. Codex (desktop app) bundles it under a
-// hash-named dir that changes on update; CLI installs (npm -g / brew) put it on PATH.
-export function resolveCodexBin(configured) {
-  if (configured && fs.existsSync(configured)) return configured;
-  const isWin = process.platform === "win32";
-  const exe = isWin ? "codex.exe" : "codex";
-
-  // 1) On PATH (npm -g / homebrew / manual installs)
-  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
-    if (!dir) continue;
-    try { const p = path.join(dir, exe); if (fs.existsSync(p)) return p; } catch {}
-  }
-
-  // 2) Newest binary under a hash-named bin dir (the desktop app's bundled CLI)
-  const newestUnder = (base) => {
-    try {
-      const found = fs.readdirSync(base)
-        .map((d) => path.join(base, d, exe))
-        .filter((p) => fs.existsSync(p))
-        .map((p) => ({ p, m: fs.statSync(p).mtimeMs }))
-        .sort((a, b) => b.m - a.m);
-      return found.length ? found[0].p : null;
-    } catch { return null; }
-  };
-
-  const home = os.homedir();
-  if (isWin) {
-    return newestUnder(path.join(process.env.LOCALAPPDATA || "", "OpenAI", "Codex", "bin"));
-  }
-  // 3) macOS / Linux known locations (desktop app bundle + common bin dirs)
-  const candidates = [];
-  if (process.platform === "darwin") {
-    const hit = newestUnder(path.join(home, "Library", "Application Support", "OpenAI", "Codex", "bin"));
-    if (hit) return hit;
-    candidates.push(
-      "/Applications/Codex.app/Contents/Resources/bin/codex",
-      "/Applications/Codex.app/Contents/MacOS/codex",
-      path.join(home, "Applications/Codex.app/Contents/Resources/bin/codex"),
-      "/opt/homebrew/bin/codex",
-      "/usr/local/bin/codex",
-      path.join(home, ".codex/bin/codex"),
-    );
-  } else { // linux
-    candidates.push(
-      "/usr/local/bin/codex", "/usr/bin/codex",
-      path.join(home, ".local/bin/codex"),
-      path.join(home, ".codex/bin/codex"),
-    );
-  }
-  for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch {} }
-  return null;
-}
+export { resolveCodexBin };
 
 // JSON-RPC over newline-delimited JSON on stdio.
 class CodexClient {
   constructor(bin) {
+    this.configuredBin = bin;
     this.bin = bin;
     this.nextId = 1;
     this.pending = new Map();
@@ -93,6 +43,9 @@ class CodexClient {
     this.onExit = () => {};
   }
   start() {
+    const bin = resolveCodexBin(this.configuredBin);
+    if (!bin) throw new Error("未找到可用 Codex；桌面端版本需包含完整配套文件，请更新或修复安装，或配置独立 CLI 路径");
+    this.bin = bin;
     this.child = spawn(this.bin, ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
     this.child.stdout.on("data", (d) => this._onData(d));
     this.child.stderr.on("data", (d) => process.stderr.write("[codex stderr] " + d.toString("utf8")));
@@ -247,10 +200,6 @@ export class CodexBridge {
   }
 
   async start() {
-    const bin = resolveCodexBin(this.config.codexBin);
-    if (!bin) throw new Error("未找到 codex 可执行文件,请在配置里设置 codexBin(或确保 codex 在 PATH 上)");
-    this.config.codexBin = bin;
-    this.codex.bin = bin;
     this.codex.start();
     await this._bootstrap();
   }
