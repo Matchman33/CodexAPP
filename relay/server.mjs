@@ -653,8 +653,12 @@ async function buildProjectTree() {
   return listProjectTree(codex, CODEX_HOME);
 }
 
-async function readThread(threadId, paged = false, requestId) {
+async function readThread(threadId, paged = false, requestId, checkWriter = false) {
   if (state.status === "running") throw new Error("请先停止当前任务再切换会话");
+  if (checkWriter) {
+    const conflict = await writers.inspectExternal(threadId);
+    if (conflict) return { ...conflict, onOpen: true, requestId };
+  }
   const page = paged ? await historyPager.open(threadId) : null;
   const t = page?.thread || await readThreadHistory(codex, threadId);
   await lifecycle.beforeSwitch();
@@ -879,9 +883,11 @@ wss.on("connection", (ws, req) => {
             if (conflict) send(ws, conflict);
             break;
           }
-          case "readThread":
-            await readThread(m.threadId, m.historyMode === "paged", m.requestId);
+          case "readThread": {
+            const conflict = await readThread(m.threadId, m.historyMode === "paged", m.requestId, m.checkWriter === true);
+            if (conflict) send(ws, conflict);
             break;
+          }
           case "inspectWriter":
             send(ws, await writers.inspect(m.threadId));
             break;

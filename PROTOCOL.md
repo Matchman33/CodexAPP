@@ -24,7 +24,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `state` | `state` | 状态变化 |
 | `models` | `models[]`, `defaultModel`, `defaultReasoningEffort`, `error` | 响应 `listModels`；列表可能为空或部分加载失败 |
 | `configSaved` | `requestId?` | 选择已保存到电脑端配置，不代表当前任务的权限已切换；实际结果见 `state.permissions` |
-| `writerConflict` | `threadId`, `owners[]`, `message` | 会话有外部写入占用；展示进程和受影响会话，不自动结束进程 |
+| `writerConflict` | `threadId`, `owners[]`, `message`, `onOpen?`, `requestId?`, `inspectionFailed?` | 外部占用或探测失败；展示进程和受影响会话，不自动结束进程 |
 | `event` | `event` | 新增一条 feed 条目 |
 | `assistantDelta` | `text` | 助手回复的流式增量（拼接显示） |
 | `outputDelta` | `text` | 命令输出增量（可选展示） |
@@ -140,7 +140,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `listModels` | `cwd?` | 从电脑端 Codex 获取模型列表与该目录的默认模型 |
 | `getState` | — | 请求重新下发快照 |
 | `listThreads` | — | 请求会话/项目列表，服务端回 `projectTree` |
-| `readThread` | `threadId`, `historyMode?`, `requestId?` | 只读查看会话，不获取写入锁；`historyMode:"paged"` 返回近期一页，回 `hello` |
+| `readThread` | `threadId`, `historyMode?`, `requestId?`, `checkWriter?` | 只读查看会话，不获取写入锁；网页切换默认传 `checkWriter:true`，先检测外部占用再加载历史 |
 | `historyPage` | `threadId`, `cursor?`, `requestId` | 只读获取历史页；省略游标获取最新页，回 `historyPage` |
 | `readHistoryItem` | `threadId`, `detailCursor`, `offset?`, `requestId` | 分段读取超长消息或工具输出，回 `historyItem` |
 | `resumeThread` | `threadId` | 接续已有会话（切到它的项目 cwd，继续这段对话） |
@@ -154,6 +154,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。新版网页启用下方的历史分页模式；未传 `historyMode` 的旧客户端保留完整历史读取兼容路径。历史包含文本、附件路径、计划、推理摘要和工具结果；经图片上传功能发送的附件可恢复缩略图，原图不作为历史文本传输，也不自动读取其他本地图片路径或下载远程地址。事件可附带 `itemId`、`threadId`、`turnId`、`phase`、`images`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
 
 ### 历史分页与缓存
+
+`readThread.checkWriter:true` 在读取历史及取消原会话订阅之前探测目标锁。Windows UUID 会话的外部持有者触发 `writerConflict`，同时带 `onOpen:true` 和原 `requestId`，本次不切换当前会话。直连只向发起选择的客户端发出该提示；网页用选择 ID 丢弃迟到的检查结果并结束加载状态。非 Windows 或非 UUID 会话暂不执行文件锁探测，接续时仍保留原有冲突处理。主动选择「仅查看历史」时重发 `readThread` 并传 `checkWriter:false`，不调用 `thread/resume`。普通旧客户端省略该字段仍按只读方式打开。此检查过滤中继自身与其 app-server PID；`releaseThread` 不会因此取得结束外部进程的权限。
 
 普通消息的实时回显可附带 `inputEcho:true`。任务受理后使用同一 `event.id` 补齐实际 `turnId`，不是再次提交提示词。网页发现同一会话、同一轮次且文本一致的持久化用户条目时移除对应临时回显；不同轮次的相同文本仍保留为独立消息。
 

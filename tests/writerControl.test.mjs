@@ -119,7 +119,7 @@ test("failed or unconfirmed process exit never implies successful takeover", asy
 function bridgeFixture() {
   const messages = [], calls = [];
   const bridge = new CodexBridge({ defaultCwd: "project", model: "model", approvalPolicy: "on-request", sandbox: "read-only" }, (m) => messages.push(structuredClone(m)));
-  bridge.state.threadId = OTHER;
+  Object.assign(bridge.state, { threadId: OTHER, codexConnected: true, readOnly: true });
   bridge.codex.request = async (method, params) => {
     calls.push({ method, params });
     if (method === "turn/interrupt") return {};
@@ -168,4 +168,62 @@ test("failed termination cannot switch conversations or resume the target", asyn
   await assert.rejects(bridge.dispatch({ type: "takeoverThread", threadId: ID, token: "token", confirmed: true }));
   assert.equal(bridge.state.threadId, OTHER);
   assert.equal(calls.length, 0);
+});
+
+test("进入会话的检查仅提示外部持有者，不把本中继占用当成外部冲突", async () => {
+  const external = fixture();
+  const conflict = await external.control.inspectExternal(ID);
+  assert.equal(conflict.owners[0].pid, OWNER.pid);
+  assert.ok(conflict.owners[0].token);
+  assert.equal(external.calls[0].action, "inspect");
+  const own = fixture({ protectedPids: () => [OWNER.pid] });
+  assert.equal(await own.control.inspectExternal(ID), null);
+  assert.equal(own.control.confirmations.size, 0);
+  const empty = fixture({ runner: async () => ({ owners: [] }) });
+  assert.equal(await empty.control.inspectExternal(ID), null);
+});
+
+test("外部检查保留探测失败状态，不谎报无人占用；不支持的平台不运行探测", async () => {
+  const failed = fixture({ runner: async () => { throw new Error("检测权限不足"); } });
+  assert.equal((await failed.control.inspectExternal(ID)).inspectionFailed, true);
+  const unsupported = fixture({ platform: "linux" });
+  assert.equal(await unsupported.control.inspectExternal(ID), null);
+  assert.equal(unsupported.calls.length, 0);
+});
+
+test("打开被占用会话时先返回绑定选择请求的冲突，不加载历史、不释放旧会话、不接续", async () => {
+  const { bridge, messages, calls } = bridgeFixture();
+  bridge.state.readOnly = false;
+  bridge.eventLog = [{ id: "old", kind: "user", text: "保留旧历史" }];
+  const { control, calls: inspections } = fixture();
+  bridge.writers = control;
+  await bridge.dispatch({ type: "readThread", threadId: ID, historyMode: "paged", requestId: "selection-1", checkWriter: true });
+  assert.equal(calls.length, 0);
+  assert.equal(inspections.length, 1); assert.equal(inspections[0].action, "inspect");
+  assert.equal(bridge.state.threadId, OTHER); assert.equal(bridge.state.readOnly, false);
+  assert.equal(bridge.eventLog[0].text, "保留旧历史");
+  assert.deepEqual([messages.at(-1).type, messages.at(-1).onOpen, messages.at(-1).requestId], ["writerConflict", true, "selection-1"]);
+});
+
+test("空闲会话正常打开，仅查看历史可明确跳过外部检查，两者都不抢占会话", async () => {
+  for (const checkWriter of [true, false]) {
+    const { bridge, messages, calls } = bridgeFixture();
+    let inspections = 0;
+    bridge.writers.inspectExternal = async () => { inspections++; return null; };
+    bridge.codex.request = async (method, params) => { calls.push({ method, params }); return { thread: { id: ID, turns: [] } }; };
+    await bridge.dispatch({ type: "readThread", threadId: ID, requestId: "selection", checkWriter });
+    assert.equal(inspections, checkWriter ? 1 : 0);
+    assert.equal(bridge.state.threadId, ID); assert.equal(bridge.state.readOnly, true);
+    assert.deepEqual(calls.map(c => c.method), ["thread/read"]);
+    assert.equal(messages.at(-1).type, "hello"); assert.equal(messages.at(-1).requestId, "selection");
+  }
+});
+
+test("解除自身占用不会走外部进程检查或结束路径", async () => {
+  const { bridge, calls, messages } = bridgeFixture();
+  bridge.writers.inspectExternal = bridge.writers.terminate = async () => { throw new Error("不应操作外部进程"); };
+  bridge.codex.request = async (method, params) => { calls.push({ method, params }); return { status: "notLoaded" }; };
+  await bridge.dispatch({ type: "releaseThread", threadId: OTHER, requestId: "release-self" });
+  assert.deepEqual(calls.map(c => c.method), ["thread/unsubscribe"]);
+  assert.equal(messages.at(-1).type, "threadReleased");
 });

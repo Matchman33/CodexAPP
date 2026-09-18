@@ -568,6 +568,11 @@ function handle(m) {
       }
       break;
     case "writerConflict":
+      if (m.onOpen) {
+        if (!pendingSelection || m.requestId !== pendingSelection.requestId || m.threadId !== pendingSelection.threadId || deletedThreads.has(m.threadId)) break;
+        clearTimeout(selectionTimer); pendingSelection = null;
+        updateHistoryControls(); updateComposer();
+      }
       clearTimeout(writerTimer);
       writerPending = null;
       writerConflict = m;
@@ -706,23 +711,24 @@ function applyState() {
 // ---------------------------------------------------------------------------
 // Feed rendering
 // ---------------------------------------------------------------------------
-function selectHistoryThread(threadId) {
-  if (threadActionPending || appState.threadAction || deletedThreads.has(threadId)) return;
+function selectHistoryThread(threadId, checkWriter = true) {
+  if (threadActionPending || appState.threadAction || writerPending || deletedThreads.has(threadId)) return;
   const requestId = historyClientId + "-select-" + newClientId();
-  if (!sendWs({ type: "readThread", threadId, historyMode: "paged", requestId })) return;
+  if (!sendWs({ type: "readThread", threadId, historyMode: "paged", requestId, checkWriter })) return;
+  writerConflict = null; writerChoice = null; $("writerSheet").classList.add("hidden");
   clearTimeout(pageTimer); pageRequest = null;
   clearTimeout(selectionTimer);
-  pendingSelection = { requestId, threadId }; lastSelectionId = requestId;
+  pendingSelection = { requestId, threadId, checkWriter }; lastSelectionId = requestId;
   updateHistoryControls(); updateComposer();
   $("sessionsSheet").classList.add("hidden");
-  selectionTimer = setTimeout(() => { pendingSelection = null; updateComposer(); updateHistoryControls("会话加载超时"); }, 20000);
+  selectionTimer = setTimeout(() => { pendingSelection = null; updateComposer(); updateHistoryControls("会话加载超时"); }, checkWriter ? 35000 : 20000);
 }
 
 function updateHistoryControls(message = "") {
   $("historyOlder").classList.toggle("hidden", !pagedHistory || !historyPages[oldestPage]?.nextCursor);
   $("historyNewer").classList.toggle("hidden", !pagedHistory || newestPage === 0);
   $("historyOlder").disabled = $("historyNewer").disabled = !!pageRequest || !!pendingSelection;
-  $("historyStatus").textContent = message || (pendingSelection || pageRequest ? "加载中…" : "");
+  $("historyStatus").textContent = message || (pendingSelection?.checkWriter ? "检查会话占用…" : pendingSelection || pageRequest ? "加载中…" : "");
   $("historyToolbar").classList.toggle("hidden", !message && !pendingSelection && !pageRequest && (!pagedHistory || (!historyPages[oldestPage]?.nextCursor && newestPage === 0)));
   $("scrollBottom").classList.toggle("hidden", followLatest && newestPage === 0);
   $("feed").setAttribute("aria-busy", String(!!pageRequest || !!pendingSelection));
@@ -1507,6 +1513,7 @@ function renderWriterConflict() {
   $("writerConfirm").classList.add("hidden");
   $("writerStatus").textContent = "";
   $("writerMessage").textContent = writerConflict.message;
+  $("writerTitle").textContent = writerConflict.inspectionFailed ? "占用检查失败" : "会话被其他进程占用";
   const list = $("writerOwners");
   list.replaceChildren();
   (writerConflict.owners || []).forEach((owner) => {
@@ -1542,6 +1549,7 @@ $("writerInspect").onclick = () => writerAction("inspectWriter");
 $("writerConfirmBtn").onclick = () => { if (writerChoice) writerAction("takeoverThread", { token: writerChoice.token, confirmed: true }); };
 $("writerCancelBtn").onclick = () => { writerChoice = null; $("writerConfirm").classList.add("hidden"); };
 $("writerClose").onclick = () => $("writerSheet").classList.add("hidden");
+$("writerReadOnly").onclick = () => { if (writerConflict && !writerPending) selectHistoryThread(writerConflict.threadId, false); };
 
 // ---------------------------------------------------------------------------
 // Service worker + boot

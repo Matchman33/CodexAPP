@@ -482,7 +482,7 @@ export class CodexBridge {
       case "approval": return this._resolveApproval(m.key, m.optionId);
       case "newThread": return this._newThread(m.cwd, m.historyMode === "paged" || !!this.history);
       case "listThreads": return this._listThreads();
-      case "readThread": return this._readThread(m.threadId, m.historyMode === "paged", m.requestId);
+      case "readThread": return this._readThread(m.threadId, m.historyMode === "paged", m.requestId, m.checkWriter === true);
       case "historyPage":
         return this.emit({ type: "historyPage", ...(await this.historyPager.page(m.threadId, m.cursor)), requestId: m.requestId });
       case "readHistoryItem":
@@ -587,8 +587,12 @@ export class CodexBridge {
   async _listThreads() {
     this.emit({ type: "projectTree", ...await listProjectTree(this.codex, CODEX_HOME) });
   }
-  async _readThread(threadId, paged = false, requestId) {
+  async _readThread(threadId, paged = false, requestId, checkWriter = false) {
     if (this.state.status === "running") throw new Error("请先停止当前任务再切换会话");
+    if (checkWriter) {
+      const conflict = await this.writers.inspectExternal(threadId);
+      if (conflict) { this.emit({ ...conflict, onOpen: true, requestId }); return; }
+    }
     const page = paged ? await this.historyPager.open(threadId) : null;
     const t = page?.thread || await readThreadHistory(this.codex, threadId);
     await this.lifecycle.beforeSwitch();

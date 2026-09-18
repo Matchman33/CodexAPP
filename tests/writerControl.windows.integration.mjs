@@ -52,9 +52,14 @@ try {
   const owner = conflict.owners.find((o) => o.pid === child.pid);
   assert(owner?.canTerminate && owner.token, "Temporary writer must be identified");
   assert.deepEqual(owner.affectedThreads, [threadId]);
+  const onOpen = await control.inspectExternal(threadId);
+  assert(onOpen.owners.some(owner => owner.pid === child.pid), "Opening must detect the isolated external writer before a prompt");
+  const selfControl = new WriterControl({ home, protectedPids: () => [process.pid, child.pid] });
+  assert.equal(await selfControl.inspectExternal(threadId), null, "The owned app-server must not trigger an external-writer popup");
   await control.terminate(threadId, owner.token, true);
   await exited;
   assert.deepEqual((await control.inspect(threadId)).owners, []);
+  assert.equal(await control.inspectExternal(threadId), null);
   console.log("PASS: isolated writer identified, confirmed, terminated, and its lock released; no model prompt sent");
 } finally {
   for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error("test complete")); }

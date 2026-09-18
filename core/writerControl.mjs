@@ -43,7 +43,14 @@ export class WriterControl {
     return path.join(this.home, "thread-writer-locks", validateThreadId(threadId) + ".lock");
   }
 
-  async inspect(id) {
+  async inspectExternal(id) {
+    // 文件锁探测只适用于 Windows UUID 会话；不会为探测而接续或获取写入权。
+    if (this.platform !== "win32" || typeof id !== "string" || !UUID.test(id)) return null;
+    const result = await this.inspect(id, { externalOnly: true });
+    return result.owners.length || result.inspectionFailed ? result : null;
+  }
+
+  async inspect(id, { externalOnly = false } = {}) {
     const threadId = validateThreadId(id);
     for (const [key, value] of this.confirmations) if (value.expires < this.now()) this.confirmations.delete(key);
     if (this.platform !== "win32") return { type: "writerConflict", threadId, owners: [], message: "此会话由其他进程占用；当前仅 Windows 支持识别并结束占用进程。" };
@@ -51,10 +58,10 @@ export class WriterControl {
     try {
       result = await this.runner({ lockFile: this.lockFile(threadId), action: "inspect" });
     } catch (error) {
-      return { type: "writerConflict", threadId, owners: [], message: error.message };
+      return { type: "writerConflict", threadId, owners: [], inspectionFailed: true, message: error.message };
     }
     const protectedPids = this.protectedPids();
-    const owners = (result.owners || []).map((owner) => {
+    const owners = (result.owners || []).filter(owner => !externalOnly || !protectedPids.includes(owner.pid)).map((owner) => {
       const canTerminate = result.owners.length === 1 && !!owner.canTerminate && !protectedPids.includes(owner.pid) && Number.isInteger(owner.pid) && owner.pid > 0;
       const token = canTerminate ? crypto.randomBytes(24).toString("base64url") : null;
       const affectedThreads = (owner.affectedThreads || []).map(validateThreadId).sort();
