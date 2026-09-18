@@ -199,6 +199,8 @@
         <button id="newThreadBtn" class="btn secondary">新建会话</button>
       </div>
       <p id="cfgError" class="small settings-error hidden" role="alert"></p>
+      <button id="releaseThreadBtn" class="btn secondary full" disabled><i data-lucide="lock-open"></i>解除当前会话占用</button>
+      <p id="threadActionStatus" class="small muted" role="status"></p>
       <button id="enableNotif" class="btn secondary full">开启审批通知</button>
       <p id="memberStatus" class="muted small"></p>
       <button id="redeemBtn" class="btn secondary full hidden">兑换 / 续费会员</button>
@@ -217,6 +219,14 @@
     </aside>
     </div>
   </div>
+
+  <dialog id="threadActionDialog" class="thread-action-dialog" aria-labelledby="threadActionTitle" aria-describedby="threadActionMessage">
+    <h2 id="threadActionTitle">删除会话</h2>
+    <p id="threadActionName"></p>
+    <p id="threadActionMessage" class="small"></p>
+    <p id="threadActionError" class="small settings-error" role="alert"></p>
+    <div class="sheet-actions"><button id="threadActionCancel" class="btn secondary" autofocus>取消</button><button id="threadActionConfirm" class="btn danger">确认删除</button></div>
+  </dialog>
 
   <div id="writerSheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="writerTitle">
     <div class="sheet-card">

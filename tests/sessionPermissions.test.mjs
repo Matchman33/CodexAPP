@@ -119,7 +119,7 @@ test("actual permission mismatches stay pending and pause the queue", async () =
 
 test("read-only history keeps selected permissions without acquiring a writer", async () => {
   const { bridge, calls } = await fixture();
-  bridge.codex.request = async () => ({ thread: { id: "history", turns: [] } });
+  bridge.codex.request = async method => method === "thread/unsubscribe" ? { status: "unsubscribed" } : { thread: { id: "history", turns: [] } };
   await bridge.dispatch({ type: "readThread", threadId: "history" });
   assert.equal(bridge.state.permissions.applied, null);
   bridge.codex.request = async (method, params) => { calls.push({ method, params }); throw new Error("must not acquire a writer"); };
@@ -137,6 +137,7 @@ test("fresh unmaterialized threads use new turn permissions without losing the t
     return request(method, params);
   };
   await bridge.dispatch({ type: "newThread" });
+  calls.length = 0; // 旧会话在新建时已取消订阅，后续只检查新会话的权限行为。
   await bridge.dispatch({ type: "setConfig", sandbox: "read-only" });
   assert(!calls.some(call => call.method === "thread/unsubscribe"));
   await bridge.dispatch({ type: "prompt", text: "fixture prompt" });

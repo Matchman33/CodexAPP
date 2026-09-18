@@ -91,6 +91,23 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ## 客户端 → 服务端
 
+### 会话管理
+
+新版 `hello.threadManagement` 为 `{delete:true,release:true}`。未声明能力的后端禁用对应网页按钮；Codex 运行时不支持接口则返回错误，不回退为磁盘删除或结束外部进程。
+
+| type | 字段 | 说明 |
+|---|---|---|
+| `deleteThread` | `threadId`, `confirmed:true`, `requestId` | 永久删除会话和派生子会话，客户端必须先显示名称与不可恢复确认 |
+| `releaseThread` | `threadId`, `requestId` | 暂停等待队列，取消当前中继订阅并确认卸载；必须明确匹配当前会话 ID |
+| `threadDeleted` | `threadId`, `requestId?` | 删除已确认；后代删除也单独广播。重复通知按 ID 幂等处理 |
+| `threadReleased` | `threadId`, `writerReleased`, `requestId` | 当前中继已确认释放；不代表其他独立进程也释放了它们的占用 |
+
+`state.threadAction` 在操作期间为 `delete` 或 `release`，完成后清空。客户端在操作期间禁用发送、切换、队列继续和相关设置，收到与 `requestId` 对应的错误时保留页面并允许人工重试。删除成功后清理相关历史页、流式状态、等待队列和列表项，并忽略迟到的旧会话响应。前端不自动重试超时的删除请求。
+
+`state.writerReleased:true` 表示当前中继已确认目标未加载；会话仍可保留在只读页面。发送或接续后重置此字段。释放前检查当前无活动任务或审批，取消订阅后重置权限同步状态，防止权限同步重新获取写入占用。队列保留且暂停；删除会话则移除对应等待条目但保留有限受理凭据，避免迟到的入队重试重复执行。
+
+主动释放通过 `thread/unsubscribe` 和 `thread/loaded/list` 确认。若 Codex 宽限期仍保留目标，只在已加载会话都确认空闲时重连本应用独占的 app-server 子进程；不结束其他进程，不删除写入锁文件。切换会话只取消旧订阅，不强制重连；刷新网页不会释放正在运行的任务。
+
 ### 图片输入
 
 `hello.imageUpload` 为 `{ supported:true, count:4, bytes:1048576, totalBytes:4194304, previewBytes:8192, queueChars:25165824 }`。未声明能力的旧后端不应接收图片请求；前端禁用选图，不影响文字消息。

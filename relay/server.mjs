@@ -23,6 +23,7 @@ import { liveItemEvent, liveDeltaEvent, settleLiveEvents, completedTurnEvent } f
 import { PromptQueue } from "../core/promptQueue.mjs";
 import { normalizeImages, buildUserInput, imageEcho, IMAGE_LIMITS } from "../core/imageInput.mjs";
 import { SessionPermissions } from "../core/sessionPermissions.mjs";
+import { ThreadLifecycle, restartIdleCodex } from "../core/threadLifecycle.mjs";
 import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -141,7 +142,9 @@ class CodexClient {
     this.child.stderr.on("data", (d) =>
       process.stderr.write("[codex stderr] " + d.toString("utf8"))
     );
+    const child = this.child;
     this.child.on("exit", (code, sig) => {
+      if (this.releasingChild === child) return;
       console.error(`[codex] app-server exited code=${code} sig=${sig}`);
       state.codexConnected = false;
       state.status = "idle"; state.turnId = null; state.readOnly = !!state.threadId;
@@ -208,6 +211,7 @@ class CodexClient {
   }
 
   request(method, params) {
+    if (this.releasingChild && this.releasingChild === this.child) return Promise.reject(new Error("会话释放期间控制连接重连，请稍后重试"));
     const id = this.nextId++;
     const payload = { jsonrpc: "2.0", id, method };
     if (params !== undefined) payload.params = params;
@@ -249,6 +253,14 @@ const promptQueue = new PromptQueue({
   },
   onChange: queue => broadcast({ type: "promptQueue", queue }),
   onSettled: turn => { if (state.turnId === turn.turnId) { state.status = "idle"; broadcastState(); } },
+});
+const lifecycle = new ThreadLifecycle({
+  state, request: (method, params) => codex.request(method, params), queue: promptQueue, permissions, pendingApprovals,
+  changed: broadcastState, emit: broadcast, clearCurrent: clearThread,
+  recycle: async () => {
+    state.codexConnected = false; promptQueue.disconnect(); broadcastState();
+    await restartIdleCodex(codex, bootstrapCodex);
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -378,7 +390,8 @@ codex.onServerRequest = (msg) => {
 // ---------------------------------------------------------------------------
 function handleNotification(msg) {
   const { method, params } = msg;
-  if (params?.threadId && (state.readOnly || (state.threadId && params.threadId !== state.threadId))) return;
+  if (lifecycle.notification(method, params)) return;
+  if (params?.threadId && (state.readOnly || params.threadId !== state.threadId)) return;
   if (method.startsWith("item/") && params?.turnId && state.turnId && params.turnId !== state.turnId) return;
   switch (method) {
     case "thread/started":
@@ -539,6 +552,7 @@ async function ensureThread(cwd, model) {
   state.cwd = params.cwd;
   state.effectiveModel = res?.model || params.model;
   permissions.confirm(res, params, true);
+  state.readOnly = false; state.writerReleased = false;
   broadcastState();
   return state.threadId;
 }
@@ -616,12 +630,14 @@ async function resolveApproval(key, optionId) {
 async function newThread(cwd, paged = false) {
   if (state.status !== "running") promptQueue.select(null);
   if (state.status === "running") throw new Error("请先停止当前任务再新建会话");
+  await lifecycle.beforeSwitch();
   state.threadId = null;
   permissions.reset();
   state.turnId = null;
   state.status = "idle";
   state.threadName = null;
   state.readOnly = false;
+  state.writerReleased = false;
   state.effectiveReasoningEffort = null;
   state.effectiveModel = null;
   state.lastDiff = "";
@@ -641,6 +657,7 @@ async function readThread(threadId, paged = false, requestId) {
   if (state.status === "running") throw new Error("请先停止当前任务再切换会话");
   const page = paged ? await historyPager.open(threadId) : null;
   const t = page?.thread || await readThreadHistory(codex, threadId);
+  await lifecycle.beforeSwitch();
   promptQueue.select(t.id);
   state.threadId = t.id;
   state.cwd = t.cwd || state.cwd;
@@ -648,6 +665,7 @@ async function readThread(threadId, paged = false, requestId) {
   state.turnId = null;
   state.status = "idle";
   state.readOnly = true;
+  state.writerReleased = false;
   permissions.reset();
   state.effectiveModel = null;
   state.effectiveReasoningEffort = null;
@@ -660,6 +678,7 @@ async function readThread(threadId, paged = false, requestId) {
 // Resume with recent display history; model context remains owned by Codex.
 async function resumeThread(threadId) {
   if (state.status === "running" && state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
+  if (state.threadId !== threadId) await lifecycle.beforeSwitch();
   let res;
   const requested = permissions.selection();
   try {
@@ -681,6 +700,7 @@ async function resumeThread(threadId) {
   state.effectiveReasoningEffort = res?.reasoningEffort || null;
 
   state.readOnly = false;
+  state.writerReleased = false;
   permissions.confirm(res, requested);
   const beforePage = new Map(eventLog.map(e => [e.id, e]));
   const page = history ? await historyPager.page(state.threadId) : null;
@@ -697,6 +717,13 @@ async function resumeThread(threadId) {
   }
 
   // Push a fresh snapshot so every client repopulates its feed with the history.
+  broadcast(snapshot());
+}
+
+function clearThread() {
+  Object.assign(state, { threadId: null, turnId: null, status: "idle", threadName: null, lastDiff: "", readOnly: false, writerReleased: false, effectiveModel: null, effectiveReasoningEffort: null });
+  permissions.reset(); pendingApprovals.clear(); eventLog.length = 0;
+  if (history) history = { paged: true, nextCursor: null };
   broadcast(snapshot());
 }
 
@@ -762,6 +789,7 @@ function snapshot() {
   return {
     type: "hello",
     imageUpload: { supported: true, ...IMAGE_LIMITS },
+    threadManagement: { delete: true, release: true },
     state,
     config: { approvalPolicy: state.approvalPolicy, sandbox: state.sandbox, cwd: state.cwd, model: state.model, reasoningEffort: state.reasoningEffort },
     pendingApprovals: [...pendingApprovals.values()].map((v) => v.approval),
@@ -824,6 +852,16 @@ wss.on("connection", (ws, req) => {
             break;
           case "interrupt":
             await interruptTurn(m.threadId, m.turnId);
+            break;
+          case "releaseThread": {
+            const result = await lifecycle.release(m.threadId);
+            send(ws, { type: "threadReleased", ...result, requestId: m.requestId });
+            break;
+          }
+          case "deleteThread":
+            await lifecycle.remove(m.threadId, m.confirmed);
+            send(ws, { type: "threadDeleted", threadId: m.threadId, requestId: m.requestId });
+            broadcast({ type: "projectTree", ...await buildProjectTree() });
             break;
           case "approval":
             await resolveApproval(m.key, m.optionId);

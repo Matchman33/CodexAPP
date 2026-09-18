@@ -22,6 +22,7 @@ import { liveItemEvent, liveDeltaEvent, settleLiveEvents, completedTurnEvent } f
 import { PromptQueue } from "./promptQueue.mjs";
 import { normalizeImages, buildUserInput, imageEcho, IMAGE_LIMITS } from "./imageInput.mjs";
 import { SessionPermissions } from "./sessionPermissions.mjs";
+import { ThreadLifecycle, restartIdleCodex } from "./threadLifecycle.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
@@ -95,7 +96,8 @@ class CodexClient {
     this.child = spawn(this.bin, ["app-server"], { stdio: ["pipe", "pipe", "pipe"] });
     this.child.stdout.on("data", (d) => this._onData(d));
     this.child.stderr.on("data", (d) => process.stderr.write("[codex stderr] " + d.toString("utf8")));
-    this.child.on("exit", (code, sig) => this.onExit(code, sig));
+    const child = this.child;
+    this.child.on("exit", (code, sig) => { if (this.releasingChild !== child) this.onExit(code, sig); });
     return this.child;
   }
   _onData(chunk) {
@@ -120,6 +122,7 @@ class CodexClient {
     if (msg.method) this.onNotification(msg);
   }
   request(method, params) {
+    if (this.releasingChild && this.releasingChild === this.child) return Promise.reject(new Error("会话释放期间控制连接重连，请稍后重试"));
     const id = this.nextId++;
     const payload = { jsonrpc: "2.0", id, method };
     if (params !== undefined) payload.params = params;
@@ -221,6 +224,15 @@ export class CodexBridge {
       onChange: queue => this.emit({ type: "promptQueue", queue }),
       onSettled: turn => { if (this.state.turnId === turn.turnId) { this.state.status = "idle"; this._broadcastState(); } },
     });
+    this.lifecycle = new ThreadLifecycle({
+      state: this.state, request: (method, params) => this.codex.request(method, params), queue: this.promptQueue,
+      permissions: this.permissions, pendingApprovals: this.pendingApprovals, changed: () => this._broadcastState(), emit: message => this.emit(message),
+      clearCurrent: () => this._clearThread(),
+      recycle: async () => {
+        this.state.codexConnected = false; this.promptQueue.disconnect(); this._broadcastState();
+        await restartIdleCodex(this.codex, () => this._bootstrap());
+      },
+    });
     this.codex.onNotification = (m) => this._onNotification(m);
     this.codex.onServerRequest = (m) => this._onServerRequest(m);
     this.codex.onExit = (code, sig) => {
@@ -286,6 +298,7 @@ export class CodexBridge {
     return {
         type: "hello",
         imageUpload: { supported: true, ...IMAGE_LIMITS },
+      threadManagement: { delete: true, release: true },
       state: this.state,
       config: { approvalPolicy: this.state.approvalPolicy, sandbox: this.state.sandbox, cwd: this.state.cwd, model: this.state.model, reasoningEffort: this.state.reasoningEffort },
       pendingApprovals: [...this.pendingApprovals.values()].map((v) => v.approval),
@@ -307,8 +320,9 @@ export class CodexBridge {
 
   _onNotification(msg) {
     const { method, params } = msg;
+    if (this.lifecycle.notification(method, params)) return;
     const st = this.state;
-    if (params?.threadId && (st.readOnly || (st.threadId && params.threadId !== st.threadId))) return;
+    if (params?.threadId && (st.readOnly || params.threadId !== st.threadId)) return;
     if (method.startsWith("item/") && params?.turnId && st.turnId && params.turnId !== st.turnId) return;
     switch (method) {
       case "thread/started":
@@ -427,6 +441,7 @@ export class CodexBridge {
     this.state.threadId = res?.thread?.id || res?.threadId || this.state.threadId;
     this.state.cwd = params.cwd;
     this.state.effectiveModel = res?.model || params.model;
+    this.state.readOnly = false; this.state.writerReleased = false;
     this.permissions.confirm(res, params, true);
     this._broadcastState();
     return this.state.threadId;
@@ -455,6 +470,15 @@ export class CodexBridge {
       case "prompt": return this._prompt(String(m.text || "").trim(), m.cwd, m.requestId, m.images);
       case "steer": return this._steer(String(m.text || "").trim(), m.images);
       case "interrupt": return this._interrupt(m.threadId, m.turnId);
+      case "releaseThread": {
+        const result = await this.lifecycle.release(m.threadId);
+        this.emit({ type: "threadReleased", ...result, requestId: m.requestId });
+        return;
+      }
+      case "deleteThread":
+        await this.lifecycle.remove(m.threadId, m.confirmed);
+        this.emit({ type: "threadDeleted", threadId: m.threadId, requestId: m.requestId });
+        return this._listThreads();
       case "approval": return this._resolveApproval(m.key, m.optionId);
       case "newThread": return this._newThread(m.cwd, m.historyMode === "paged" || !!this.history);
       case "listThreads": return this._listThreads();
@@ -546,9 +570,11 @@ export class CodexBridge {
   async _newThread(cwd, paged = false) {
     if (this.state.status !== "running") this.promptQueue.select(null);
     if (this.state.status === "running") throw new Error("请先停止当前任务再新建会话");
+    await this.lifecycle.beforeSwitch();
     this.state.threadId = null; this.state.turnId = null; this.state.status = "idle";
     this.permissions.reset();
     this.state.threadName = null; this.state.lastDiff = ""; this.state.readOnly = false;
+    this.state.writerReleased = false;
     this.state.effectiveReasoningEffort = null;
     this.state.effectiveModel = null;
     this.eventLog = [];
@@ -565,6 +591,7 @@ export class CodexBridge {
     if (this.state.status === "running") throw new Error("请先停止当前任务再切换会话");
     const page = paged ? await this.historyPager.open(threadId) : null;
     const t = page?.thread || await readThreadHistory(this.codex, threadId);
+    await this.lifecycle.beforeSwitch();
     this.promptQueue.select(t.id);
     this.state.threadId = t.id;
     this.state.cwd = t.cwd || this.state.cwd;
@@ -572,6 +599,7 @@ export class CodexBridge {
     this.state.turnId = null;
     this.state.status = "idle";
     this.state.readOnly = true;
+    this.state.writerReleased = false;
     this.permissions.reset();
     this.state.effectiveModel = null;
     this.state.effectiveReasoningEffort = null;
@@ -582,6 +610,7 @@ export class CodexBridge {
   }
   async _resumeThread(threadId) {
     if (this.state.status === "running" && this.state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
+    if (this.state.threadId !== threadId) await this.lifecycle.beforeSwitch();
     let res;
     const requested = this.permissions.selection();
     try {
@@ -603,6 +632,7 @@ export class CodexBridge {
     this.state.effectiveModel = res?.model || null;
     this.state.effectiveReasoningEffort = res?.reasoningEffort || null;
     this.state.readOnly = false;
+    this.state.writerReleased = false;
     this.permissions.confirm(res, requested);
     const beforePage = new Map(this.eventLog.map(e => [e.id, e]));
     const page = this.history ? await this.historyPager.page(this.state.threadId) : null;
@@ -619,5 +649,11 @@ export class CodexBridge {
     }
     this.emit(this.snapshot());
     return true;
+  }
+  _clearThread() {
+    Object.assign(this.state, { threadId: null, turnId: null, status: "idle", threadName: null, lastDiff: "", readOnly: false, writerReleased: false, effectiveModel: null, effectiveReasoningEffort: null });
+    this.permissions.reset(); this.pendingApprovals.clear(); this.eventLog = [];
+    if (this.history) this.history = { paged: true, nextCursor: null };
+    this.emit(this.snapshot());
   }
 }

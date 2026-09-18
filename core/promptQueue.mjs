@@ -55,6 +55,12 @@ export class PromptQueue {
     bucket.items = bucket.items.filter(item => item.id !== id);
     this.cleanup(); this.changed();
   }
+  removeThread(threadId) {
+    this.threads.delete(threadId);
+    if (this.active?.threadId === threadId) this.active = null;
+    // 保留受理凭据，迟到的重试不能重新执行已删除会话的消息。
+    this.changed();
+  }
   pause(threadId, reason = "队列已手动暂停") {
     if (!threadId) return;
     const bucket = this.bucket(threadId); bucket.paused = true; bucket.reason = String(reason).slice(0, 1024);

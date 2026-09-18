@@ -1,5 +1,5 @@
 // 仅缓存应用外壳，不缓存账号接口、健康检查或聊天数据。
-const CACHE = "codexapp-v17-image-upload";
+const CACHE = "codexapp-v18-thread-lifecycle";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./history-feed.js", "./image-attachments.js", "./e2e.js", "./vendor/nacl.js", "./vendor/chat-ui.js", "./manifest.webmanifest", "./icon-180.png", "./icon-512.png"];
 const shellPaths = new Set(SHELL.map((p) => new URL(p, self.location).pathname));
 self.addEventListener("install", (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));

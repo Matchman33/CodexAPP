@@ -3,13 +3,14 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { appendTextPreview, appendReasoningPreview } from "../core/textPreview.mjs";
 import { mergeMessageEvents } from "../core/messageOrder.mjs";
+import { Trash2, LockOpen } from "lucide";
 
 const icons = { Menu, SquarePen, Settings2, ChevronDown, ChevronUp, ArrowUp, Square, X, RefreshCw, Folder, MessageSquare, Search, ArrowDown, Copy, Check, FileDiff, SlidersHorizontal, ShieldCheck, Ellipsis, Sun, Moon, Pause, Play, ListOrdered, ListPlus, ImagePlus };
 window.ChatUI = {
   appendTextPreview,
   appendReasoningPreview,
   mergeMessageEvents,
-  icons(root = document) { createIcons({ icons, root, attrs: { "aria-hidden": "true", "stroke-width": 1.8 } }); },
+  icons(root = document) { createIcons({ icons: { ...icons, Trash2, LockOpen }, root, attrs: { "aria-hidden": "true", "stroke-width": 1.8 } }); },
   markdown(text) {
     return DOMPurify.sanitize(marked.parse(text || "", { gfm: true, breaks: true }), {
       USE_PROFILES: { html: true }, FORBID_TAGS: ["img", "style", "input", "button", "form", "video", "audio", "iframe"],

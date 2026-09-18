@@ -41,6 +41,11 @@ const historyClientId = "history-" + Math.random().toString(36).slice(2);
 let lastSelectionId = null;
 let requestedPagedMode = false;
 let promptQueueState = null;
+let threadManagement = {};
+let threadActionChoice = null;
+let threadActionPending = null;
+let threadActionTimer = null;
+const deletedThreads = new Set();
 let imageUploadSupported = false;
 let pendingDirect = null;
 let pendingPrompt = null;
@@ -488,6 +493,7 @@ $("reconnectBtn").onclick = resumeConnection;
 function handle(m) {
   switch (m.type) {
     case "hello":
+      if (deletedThreads.has(m.state?.threadId)) break;
       if (m.requestId?.startsWith(historyClientId + "-select-") && m.requestId !== lastSelectionId) break;
       if (pendingSelection && (m.requestId ? m.requestId !== pendingSelection.requestId : m.state?.threadId !== pendingSelection.threadId)) break;
       clearTimeout(selectionTimer); pendingSelection = null;
@@ -502,6 +508,7 @@ function handle(m) {
       writerPending = null; writerConflict = null;
       $("writerSheet").classList.add("hidden");
       appState = m.state || {};
+      threadManagement = m.threadManagement || {};
       imageUploadSupported = !!m.imageUpload?.supported;
       promptQueueState = m.promptQueue?.supported ? m.promptQueue : null;
       if (pendingPrompt && promptQueueState?.acceptedRequestIds?.includes(pendingPrompt.requestId)) acceptPrompt(pendingPrompt.requestId);
@@ -532,6 +539,7 @@ function handle(m) {
       if (!pagedHistory && !requestedPagedMode) { requestedPagedMode = true; sendWs({ type: "getState", historyMode: "paged" }); }
       break;
     case "state":
+      if (deletedThreads.has(m.state?.threadId)) break;
       if (pendingSelection) break;
       const completedTurn = appState.status === "running" && m.state?.status === "idle";
       appState = m.state || appState;
@@ -615,6 +623,7 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (m.requestId && m.requestId === threadActionPending?.requestId) { finishThreadAction(m.message); break; }
       if (pendingPrompt && pendingPrompt.requestId === m.requestId) {
         clearTimeout(promptTimer); pendingPrompt = null; $("promptStatus").textContent = m.message; updateComposer(); break;
       }
@@ -647,6 +656,16 @@ function handle(m) {
     case "projectTree":
       renderProjectTree(m);
       break;
+    case "threadReleased":
+      if (m.requestId === threadActionPending?.requestId) {
+        $("threadActionStatus").textContent = m.writerReleased ? "当前中继已释放会话占用，可以在其他进程接续。" : "已取消订阅，正在等待会话卸载。";
+        finishThreadAction();
+      }
+      break;
+    case "threadDeleted":
+      forgetDeletedThread(m.threadId);
+      if (m.requestId === threadActionPending?.requestId) { $("threadActionStatus").textContent = "会话已删除"; finishThreadAction(); }
+      break;
   }
 }
 
@@ -666,7 +685,7 @@ function applyState() {
   $("connDot").classList.toggle("on", connected);
   const running = appState.status === "running";
   const pill = $("statusPill");
-  pill.textContent = !connected ? connectionLabel : appState.readOnly ? "历史" : running ? "运行中" : "已连接";
+  pill.textContent = !connected ? connectionLabel : appState.writerReleased ? "已释放" : appState.readOnly ? "历史" : running ? "运行中" : "已连接";
   pill.title = pill.textContent;
   $("reconnectBtn").classList.toggle("hidden", !!connected);
   pill.className = "pill " + (running ? "running" : "idle");
@@ -688,6 +707,7 @@ function applyState() {
 // Feed rendering
 // ---------------------------------------------------------------------------
 function selectHistoryThread(threadId) {
+  if (threadActionPending || appState.threadAction || deletedThreads.has(threadId)) return;
   const requestId = historyClientId + "-select-" + newClientId();
   if (!sendWs({ type: "readThread", threadId, historyMode: "paged", requestId })) return;
   clearTimeout(pageTimer); pageRequest = null;
@@ -1072,9 +1092,10 @@ $("imageDialog").addEventListener("close", () => $("imageDialog").querySelector(
 $("imageDialog").addEventListener("click", event => { if (event.target === $("imageDialog")) $("imageDialog").close(); });
 function updateComposer() {
   const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN && appState.codexConnected) && (profile.mode !== "cloud" || (!!agentPub && paired));
-  const blocked = appState.status === "running" && !$("steerMode").checked && !promptQueueState?.supported;
+  const managing = !!threadActionPending || !!appState.threadAction;
+  const blocked = managing || (appState.status === "running" && !$("steerMode").checked && !promptQueueState?.supported);
   $("sendBtn").disabled = !connected || (!$("input").value.trim() && !attachments.items.length) || blocked || !!pendingSelection || !!pendingPrompt || attachments.busy || (attachments.items.length > 0 && !imageUploadSupported);
-  const locked = !!pendingPrompt || !!pendingSelection;
+  const locked = !!pendingPrompt || !!pendingSelection || managing;
   if (attachments.locked !== locked) { attachments.locked = locked; attachments.render(); }
   $("attachImageBtn").disabled = !imageUploadSupported || locked || attachments.busy || attachments.items.length >= 4;
   $("steerMode").disabled = !!pendingPrompt;
@@ -1085,9 +1106,13 @@ function updateComposer() {
   if ($("sendBtn").dataset.icon !== sendIcon) { $("sendBtn").dataset.icon = sendIcon; $("sendBtn").innerHTML = '<i data-lucide="' + sendIcon + '"></i>'; window.ChatUI.icons($("sendBtn")); }
   $("input").placeholder = $("steerMode").checked ? "补充当前任务" : queueSend ? "加入待执行队列" : "发送消息";
   $("retryPrompt").classList.toggle("hidden", !pendingPrompt || pendingPrompt.waiting);
-  $("retryPrompt").disabled = !connected || !!pendingSelection;
-  $("queuePause").disabled = !connected || !!pendingSelection;
-  $("quickNewThread").disabled = $("sidebarNewThread").disabled = appState.status === "running" || !connected;
+  $("retryPrompt").disabled = !connected || !!pendingSelection || managing;
+  $("queuePause").disabled = !connected || !!pendingSelection || managing;
+  $("quickNewThread").disabled = $("sidebarNewThread").disabled = appState.status === "running" || !connected || managing;
+  $("releaseThreadBtn").disabled = !threadManagement.release || !appState.threadId || !connected || appState.status === "running" || !!pendingSelection || !!pendingPrompt || managing || appState.writerReleased === true;
+  document.querySelectorAll(".session-delete").forEach(button => { button.disabled = !threadManagement.delete || !connected || appState.status === "running" || !!pendingSelection || !!pendingPrompt || managing; });
+  $("threadActionConfirm").disabled = !connected || managing || appState.status === "running" || !!pendingPrompt || !!pendingSelection;
+  updateSettingsButtons();
 }
 input.addEventListener("input", () => {
   input.style.height = "auto";
@@ -1229,8 +1254,8 @@ function renderEffortOptions(selected = selectedEffort()) {
   $("customEffortRow").classList.toggle("hidden", select.value !== "custom");
 }
 function updateSettingsButtons() {
-  $("cfgApply").disabled = !!pendingConfig;
-  $("newThreadBtn").disabled = !!pendingConfig;
+  $("cfgApply").disabled = !!pendingConfig || !!threadActionPending || !!appState.threadAction;
+  $("newThreadBtn").disabled = !!pendingConfig || !!threadActionPending || !!appState.threadAction || appState.status === "running";
 }
 
 function renderPermissions() {
@@ -1308,7 +1333,7 @@ function saveSettings(newThread = false) {
 $("cfgApply").onclick = () => saveSettings();
 $("newThreadBtn").onclick = () => saveSettings(true);
 function quickNewThread() {
-  if (appState.status === "running") return;
+  if (appState.status === "running" || threadActionPending || appState.threadAction) return;
   if (sendWs({ type: "newThread" })) $("sessionsSheet").classList.add("hidden");
 }
 $("quickNewThread").onclick = $("sidebarNewThread").onclick = quickNewThread;
@@ -1349,6 +1374,7 @@ $("sessionsClose").onclick = () => $("sessionsSheet").classList.add("hidden");
 // ones show 暂无对话) + the flat 对话 group. Data comes from the relay, which
 // reads Codex's own .codex-global-state.json.
 function sessionItem(t) {
+  const row = document.createElement("div"); row.className = "session-row";
   const item = document.createElement("button");
   item.className = "session-item nested";
   item.dataset.threadId = t.id;
@@ -1361,10 +1387,14 @@ function sessionItem(t) {
   item.onclick = () => {
     selectHistoryThread(t.id);
   };
-  return item;
+  const remove = document.createElement("button"); remove.className = "icon-btn session-delete";
+  remove.title = "删除会话"; remove.setAttribute("aria-label", "删除会话：" + (t.name || "无标题")); remove.innerHTML = '<i data-lucide="trash-2"></i>';
+  remove.onclick = () => openThreadAction("deleteThread", t.id, t.name);
+  row.append(item, remove); return row;
 }
 
 function renderProjectTree(tree) {
+  tree = { ...tree, projects: (tree.projects || []).map(project => ({ ...project, threads: project.threads.filter(t => !deletedThreads.has(t.id)) })), projectless: (tree.projectless || []).filter(t => !deletedThreads.has(t.id)) };
   lastProjectTree = tree;
   const query = $("sessionSearch").value.trim().toLowerCase();
   const list = $("sessionsList");
@@ -1398,8 +1428,59 @@ function renderProjectTree(tree) {
     projectless.forEach((t) => list.appendChild(sessionItem(t)));
   }
   window.ChatUI.icons(list);
+  updateComposer();
 }
 $("sessionSearch").oninput = () => { if (lastProjectTree) renderProjectTree(lastProjectTree); };
+
+function openThreadAction(type, threadId, name) {
+  if (threadActionPending || appState.threadAction) return;
+  threadActionChoice = { type, threadId };
+  const deleting = type === "deleteThread";
+  $("threadActionTitle").textContent = deleting ? "删除会话" : "解除会话占用";
+  $("threadActionName").textContent = name || "无标题会话";
+  $("threadActionMessage").textContent = deleting
+    ? "将永久删除此会话及其派生的子会话记录，同时取消相关待执行消息。删除后无法恢复，已修改的项目文件不会回滚。"
+    : "暂停此会话的等待队列并释放当前中继的占用。必要时会重连中继自己的空闲控制进程，聊天记录和草稿保留。";
+  $("threadActionError").textContent = "";
+  $("threadActionConfirm").textContent = deleting ? "确认删除" : "确认解除";
+  $("threadActionConfirm").className = "btn " + (deleting ? "danger" : "primary");
+  updateComposer(); $("threadActionDialog").showModal(); $("threadActionCancel").focus();
+}
+$("releaseThreadBtn").onclick = () => openThreadAction("releaseThread", appState.threadId, appState.threadName);
+$("threadActionCancel").onclick = () => $("threadActionDialog").close();
+$("threadActionDialog").addEventListener("cancel", event => { if (threadActionPending) event.preventDefault(); });
+$("threadActionConfirm").onclick = () => {
+  if (!threadActionChoice || threadActionPending || $("threadActionConfirm").disabled) return;
+  const message = { ...threadActionChoice, confirmed: true, requestId: "thread-action-" + newClientId() };
+  if (!sendWs(message)) { $("threadActionError").textContent = "连接已断开，请重连后重试"; return; }
+  threadActionPending = message; $("threadActionCancel").disabled = true;
+  $("threadActionError").textContent = "处理中…";
+  threadActionTimer = setTimeout(() => finishThreadAction("确认超时，操作结果尚未确定。请刷新会话列表核对，不会自动重试。"), 30000);
+  updateComposer();
+};
+function finishThreadAction(error) {
+  clearTimeout(threadActionTimer); threadActionPending = null; $("threadActionCancel").disabled = false;
+  if (error) { $("threadActionError").textContent = error; $("threadActionStatus").textContent = error; }
+  else { $("threadActionDialog").close(); threadActionChoice = null; }
+  updateComposer();
+}
+function forgetDeletedThread(threadId) {
+  deletedThreads.add(threadId);
+  if (deletedThreads.size > 500) deletedThreads.delete(deletedThreads.values().next().value);
+  if (pendingSelection?.threadId === threadId) { clearTimeout(selectionTimer); pendingSelection = null; lastSelectionId = null; }
+  if (appState.threadId === threadId) {
+    clearTimeout(pageTimer); pageRequest = null;
+    for (const request of itemRequests.values()) clearTimeout(request.timer);
+    itemRequests.clear(); pageCache.clear(); recentOverlay.clear(); historyPages = [];
+    historyFeed.replace([], true); liveAssistant = null; pagedHistory = false;
+    appState = { ...appState, threadId: null, turnId: null, threadName: null, status: "idle", readOnly: false, writerReleased: false };
+    promptQueueState = null; setDiff(""); $("approvals").replaceChildren();
+    applyState(); renderPromptQueue(); updateHistoryControls();
+  }
+  if (pendingPrompt?.threadId === threadId) { clearTimeout(promptTimer); pendingPrompt = null; }
+  if (lastProjectTree) renderProjectTree(lastProjectTree);
+  updateComposer();
+}
 
 function updateWriterButtons() {
   $("writerSheet").querySelectorAll("button").forEach((button) => { button.disabled = !!writerPending; });

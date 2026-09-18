@@ -208,6 +208,17 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .sg-path { display: none; }
 .session-item { flex: 0 0 auto; min-width: 0; text-align: left; border: 0; border-radius: 6px; padding: 10px 12px; background: transparent; }
 .session-item.active { background: var(--line); }
+.session-row { display: flex; align-items: center; min-width: 0; }
+.session-row .session-item { flex: 1 1 auto; width: 0; }
+.session-delete { color: var(--muted); }
+.session-delete:hover { color: var(--danger); }
+.thread-action-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; padding: 22px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+.thread-action-dialog::backdrop { background: #00000080; }
+.thread-action-dialog h2 { margin: 0 0 14px; font-size: 20px; }
+.thread-action-dialog p { overflow-wrap: anywhere; line-height: 1.6; }
+#threadActionName { font-weight: 600; }
+#releaseThreadBtn { display: flex; align-items: center; justify-content: center; gap: 8px; }
+#releaseThreadBtn svg { width: 18px; height: 18px; }
 .s-name { color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s-meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
 @media (max-width: 430px) { .model-trigger span { display: none; } .topbar { gap: 0; } .topinfo { gap: 4px; } .topinfo .pill { max-width: 65px; } .empty-state h1 { font-size: 22px; } }
