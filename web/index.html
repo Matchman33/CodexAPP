@@ -128,6 +128,7 @@
     <button id="diffBar" class="diff-bar hidden"><i data-lucide="file-diff"></i>查看本次改动</button>
 
     <footer class="composer">
+      <div id="downloadBar" class="download-bar hidden" role="status"><span id="downloadStatus"></span><button id="cancelDownload" class="icon-btn" aria-label="取消下载" title="取消下载"><i data-lucide="x"></i></button></div>
       <p id="permissionStatus" class="permission-status hidden" role="status"></p>
       <section id="queuePanel" class="queue-panel hidden" aria-label="待执行消息">
         <div class="queue-header">
@@ -265,6 +266,7 @@
   <script src="history-feed.js"></script>
   <dialog id="imageDialog" class="image-dialog" aria-label="图片预览"><button class="icon-btn" type="button" aria-label="关闭图片预览" title="关闭图片预览"><i data-lucide="x"></i></button><img alt="图片" /></dialog>
   <script src="image-attachments.js"></script>
+  <script src="file-downloads.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -17,6 +17,7 @@
     "test:reasoning-web": "npm run build:web && node tests/reasoning-web.integration.mjs",
     "test:permissions-web": "npm run build:web && node tests/permissions-web.integration.mjs",
     "test:images-web": "npm run build:web && node tests/images-web.integration.mjs",
+    "test:files-web": "npm run build:web && node tests/files-web.integration.mjs",
     "test:lifecycle-web": "npm run build:web && node tests/threadLifecycle-web.integration.mjs",
     "test:writer-web": "npm run build:web && node tests/writerOnOpen-web.integration.mjs",
     "test:writer-process": "node tests/writerControl.windows.integration.mjs",

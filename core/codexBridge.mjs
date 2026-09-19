@@ -23,6 +23,7 @@ import { normalizeImages, buildUserInput, imageEcho, IMAGE_LIMITS } from "./imag
 import { SessionPermissions } from "./sessionPermissions.mjs";
 import { ThreadLifecycle, restartIdleCodex } from "./threadLifecycle.mjs";
 import { resolveCodexBin } from "./codexBinary.mjs";
+import { FileAttachments } from "./fileAttachments.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
@@ -148,7 +149,8 @@ export class CodexBridge {
   constructor(config, emit, saveModel) {
     this.config = config;
     if (!this.config.defaultCwd) this.config.defaultCwd = os.homedir(); // empty/missing -> home
-    this.emit = emit; // (msg) => void  — outbound CodexApp message
+    this.files = new FileAttachments();
+    this.emit = message => emit(this.files.decorate(message, this.state));
     this.state = {
       codexConnected: false, codexVersion: null, threadId: null, turnId: null,
       cwd: config.defaultCwd, status: "idle", model: config.model || null,
@@ -244,7 +246,7 @@ export class CodexBridge {
   }
 
   snapshot() {
-    return {
+    return this.files.decorate({
         type: "hello",
         imageUpload: { supported: true, ...IMAGE_LIMITS },
       threadManagement: { delete: true, release: true },
@@ -255,7 +257,7 @@ export class CodexBridge {
       history: this.history,
       promptQueue: this.promptQueue.snapshot(),
       diff: this.state.lastDiff,
-    };
+    }, this.state);
   }
 
   // ---- codex -> client ----
@@ -397,6 +399,7 @@ export class CodexBridge {
   }
 
   dispatch(m) {
+    if (m.type === "readAttachment") return this.files.read(m).then(message => this.emit(message));
     if (m.type === "historyPage" || m.type === "readHistoryItem") return this._dispatchCommand(m);
     const task = this.commandQueue.catch(() => {}).then(() => this._dispatchCommand(m));
     this.commandQueue = task;

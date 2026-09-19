@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { historyImages } from "./imageInput.mjs";
+import { fileReferences } from "./fileAttachments.mjs";
 
 const recency = (t) => t.recencyAt ?? t.updatedAt ?? t.createdAt ?? 0;
 const lastSegment = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
@@ -112,7 +113,8 @@ export function itemToEvent(item) {
     case "userMessage":
       if ((item.content || []).some(c => c.type === "image" || c.type === "localImage")) fields.images = historyImages(item.content);
       text = (item.content || []).map((c) => c.type === "text" ? c.text : c.type === "localImage" ? "[图片] " + (c.path || "") : c.type === "skill" ? "[技能] " + (c.name || c.path || "") : c.type === "mention" ? "[引用] " + (c.name || c.path || "") : "").filter(Boolean).join("\n") || (fields.images?.length ? "[图片]" : ""); break;
-    case "agentMessage": case "plan": text = item.text; break;
+    case "agentMessage": text = item.text; fields.fileRefs = fileReferences(text); break;
+    case "plan": text = item.text; break;
     case "reasoning": {
       const joined = (item.summary || []).join("\n"), summary = joined.trim() ? joined : "";
       text = summary || (item.content || []).join("\n");
@@ -126,6 +128,7 @@ export function itemToEvent(item) {
       text = prefix + output; break;
     }
     case "fileChange": {
+      fields.fileRefs = (item.changes || []).filter(change => (change.kind?.type || change.kind) !== "delete").slice(0, 12).map(change => change.path).filter(p => typeof p === "string");
       text = (item.changes || []).map((c) => c.path + (c.diff ? "\n" + c.diff : "")).join("\n") || "文件变更";
       let budget = 8192;
       fields.changeCount = item.changes?.length || 0;
@@ -143,7 +146,7 @@ export function itemToEvent(item) {
     case "dynamicToolCall": text = "工具: " + [item.namespace, item.tool].filter(Boolean).join("/") + (item.contentItems ? "\n" + item.contentItems.map((c) => c.text || "[图片]").join("\n") : ""); break;
     case "collabAgentToolCall": text = "子任务: " + item.tool + (item.prompt ? "\n" + item.prompt : ""); break;
     case "imageView": text = "[图片] " + item.path; break;
-    case "imageGeneration": text = "[生成图片] " + (item.savedPath || item.revisedPrompt || item.status); break;
+    case "imageGeneration": text = "[生成图片] " + (item.savedPath || item.revisedPrompt || item.status); fields.fileRefs = item.savedPath ? [item.savedPath] : []; break;
     case "enteredReviewMode": case "exitedReviewMode": text = item.review; break;
     case "contextCompaction": text = "上下文已压缩"; break;
     default: return null;

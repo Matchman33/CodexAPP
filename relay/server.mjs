@@ -15,6 +15,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { resolveCodexBin } from "../core/codexBinary.mjs";
+import { FileAttachments } from "../core/fileAttachments.mjs";
 import { ModelSettings, persistModel } from "../core/modelSettings.mjs";
 import { WriterControl, isWriterConflict } from "../core/writerControl.mjs";
 import { listProjectTree, readThreadHistory, historyEvents } from "../core/threadDisplay.mjs";
@@ -777,13 +778,14 @@ const httpServer = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: "/ws", maxPayload: 8 * 1048576 });
 const clients = new Set();
+const files = new FileAttachments();
 let commandQueue = Promise.resolve();
 
 function send(ws, obj) {
-  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
+  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(files.decorate(obj, state)));
 }
 function broadcast(obj) {
-  const s = JSON.stringify(obj);
+  const s = JSON.stringify(files.decorate(obj, state));
   for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(s);
 }
 function broadcastState() {
@@ -832,6 +834,10 @@ wss.on("connection", (ws, req) => {
     try {
       m = JSON.parse(raw.toString());
     } catch {
+      return;
+    }
+    if (m.type === "readAttachment") {
+      files.read(m).then(message => send(ws, message)).catch(error => send(ws, { type: "error", message: error.message, requestId: m.requestId }));
       return;
     }
     if (m.type === "historyPage" || m.type === "readHistoryItem") {

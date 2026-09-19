@@ -91,6 +91,16 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ## 客户端 → 服务端
 
+### 生成文件下载
+
+`hello.fileDownloads` 声明 `{supported:true,maxBytes:33554432,chunkBytes:196608,perEvent:12,entries:512}`。助手消息、文件变更与图片生成事件可以携带 `files[]`：`{id,threadId,name,size,mime,preview,reference}`；`reference` 是原始文件引用，仅供网页关联聊天链接，不能代替下载授权。历史转换保留有界 `fileRefs[]`，保证长文本截断后仍可登记附件。
+
+客户端发送 `{type:"readAttachment",attachmentId,threadId,offset:0,requestId}`。后端响应 `{type:"attachmentChunk",attachmentId,threadId,requestId,offset,total,data,nextOffset}`；`data` 是该块的 Base64，`nextOffset:null` 表示完成，其他值用于请求下一块。客户端逐块校验 ID、会话、位置与总长度，收齐后创建下载文件；取消或断线丢弃未完成内容，不自动重试。错误使用原有 `error` 并回传 `requestId`。
+
+登记只接受会话工作目录内、明确出现在助手文件引用或生成事件中的允许类型文件。拒绝网络地址、目录穿越、指向项目外的符号链接、硬链接、隐藏目录、常见凭据及未开放类型；每次读取核验规范路径和文件身份、大小、修改时间。客户端只能请求已登记的随机附件 ID，不能指定文件系统路径。旧 ID 因文件变化、登记淘汰或后端重启失效时，应重新打开历史获取元信息。会话删除会撤销对应登记。
+
+单个文件不超过 32 MiB，每块不超过 192 KiB，全局最多 4 个同时读取请求，登记表最多 512 个条目。下载通过已鉴权的原连接返回给请求方，直连不广播文件分块；云 Agent 使用既有 E2E 信封。文件请求不进入模型任务控制队列，不等待模型执行完成；不新增公开文件下载目录或接受任意磁盘路径的 HTTP 接口。网页预览仅允许 PNG/JPEG/WebP/GIF，其他文件作为下载内容处理，不执行 HTML 或脚本。
+
 ### 会话管理
 
 新版 `hello.threadManagement` 为 `{delete:true,release:true}`。未声明能力的后端禁用对应网页按钮；Codex 运行时不支持接口则返回错误，不回退为磁盘删除或结束外部进程。

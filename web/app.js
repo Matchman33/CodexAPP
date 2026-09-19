@@ -5,6 +5,9 @@
 
 const $ = (id) => document.getElementById(id);
 const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
+const fileDownloads = new window.FileDownloads(message => sendWs(message));
+$("cancelDownload").onclick = () => fileDownloads.cancel();
+$("imageDialog").addEventListener("close", () => fileDownloads.clearPreview());
 
 // Request/display IDs must also work on ordinary HTTP IP origins.
 function newClientId() {
@@ -307,6 +310,7 @@ function connect() {
 }
 
 function disposeConnection() {
+  fileDownloads.disconnect();
   clearTimeout(promptTimer);
   if (pendingPrompt) { pendingPrompt.waiting = false; $("promptStatus").textContent = "连接中断，消息受理状态待确认"; }
   requestedPagedMode = false;
@@ -510,6 +514,7 @@ function handle(m) {
       appState = m.state || {};
       threadManagement = m.threadManagement || {};
       imageUploadSupported = !!m.imageUpload?.supported;
+      fileDownloads.configure(m.fileDownloads);
       promptQueueState = m.promptQueue?.supported ? m.promptQueue : null;
       if (pendingPrompt && promptQueueState?.acceptedRequestIds?.includes(pendingPrompt.requestId)) acceptPrompt(pendingPrompt.requestId);
       else if (pendingPrompt) pendingPrompt.waiting = false;
@@ -628,6 +633,7 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (fileDownloads.error(m)) break;
       if (m.requestId && m.requestId === threadActionPending?.requestId) { finishThreadAction(m.message); break; }
       if (pendingPrompt && pendingPrompt.requestId === m.requestId) {
         clearTimeout(promptTimer); pendingPrompt = null; $("promptStatus").textContent = m.message; updateComposer(); break;
@@ -660,6 +666,9 @@ function handle(m) {
       break;
     case "projectTree":
       renderProjectTree(m);
+      break;
+    case "attachmentChunk":
+      fileDownloads.receive(m);
       break;
     case "threadReleased":
       if (m.requestId === threadActionPending?.requestId) {
@@ -915,6 +924,7 @@ function setEventText(div, e) {
   if (e.truncated) addContentNavigation(div, e);
   else div.querySelector(".history-content-nav")?.remove();
   const copy = div.querySelector(".message-actions button");
+  fileDownloads.render(div, e);
   if (copy) { copy.title = e.truncated ? "复制当前段" : "复制回复"; copy.setAttribute("aria-label", copy.title); }
 }
 
@@ -1471,6 +1481,7 @@ function finishThreadAction(error) {
   updateComposer();
 }
 function forgetDeletedThread(threadId) {
+  if (fileDownloads.active?.file.threadId === threadId) fileDownloads.cancel("会话已删除，下载已取消");
   deletedThreads.add(threadId);
   if (deletedThreads.size > 500) deletedThreads.delete(deletedThreads.values().next().value);
   if (pendingSelection?.threadId === threadId) { clearTimeout(selectionTimer); pendingSelection = null; lastSelectionId = null; }
