@@ -1,12 +1,11 @@
 "use strict";
 
 window.FileDownloads = class FileDownloads {
-  constructor(send) { this.send = send; this.active = null; this.supported = false; this.maxBytes = 32 * 1048576; this.chunkBytes = 192 * 1024; this.previewUrl = null; }
+  constructor(send) { this.send = send; this.active = null; this.supported = false; this.maxBytes = 32 * 1048576; this.chunkBytes = 192 * 1024; this.previewUrl = null; this.savedUrl = null; }
   configure(capability) { this.supported = !!capability?.supported; }
   render(row, event) {
     row.querySelector(".file-attachments")?.remove();
-    if (!this.supported) return;
-    const files = event.files || [];
+    const files = this.supported ? event.files || [] : [];
     const list = document.createElement("div"); list.className = "file-attachments"; list.setAttribute("aria-label", "生成的文件");
     for (const file of files.slice(0, 12)) {
       const card = document.createElement("div"); card.className = "file-attachment";
@@ -22,11 +21,12 @@ window.FileDownloads = class FileDownloads {
     if (files.length) { row.append(list); window.ChatUI.icons(list); }
     for (const link of row.querySelectorAll(".body a")) {
       const reference = link.getAttribute("href");
-      const file = files.find(file => file.reference === reference);
-      if (file) { link.removeAttribute("target"); link.onclick = e => { e.preventDefault(); this.start(file, !!file.preview); }; }
-      else if (reference && !reference.startsWith("#") && (!/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(reference) || /^(?:file:|sandbox:|[a-z]:[\\/])/i.test(reference))) {
+      const marker = /^#codex-(file|preview)-(\d+)$/.exec(reference || "");
+      const file = marker ? files[Number(marker[2])] : files.find(file => file.reference === reference || file.references?.includes(reference));
+      if (file) { link.removeAttribute("target"); link.onclick = e => { e.preventDefault(); this.start(file, marker?.[1] === "preview"); }; }
+      else if (reference === "#codex-file-unavailable" || marker || (reference && !reference.startsWith("#") && (!/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(reference) || /^(?:file:|sandbox:|[a-z]:[\\/])/i.test(reference)))) {
         link.removeAttribute("target");
-        link.onclick = e => { e.preventDefault(); if (this.active) return; $("downloadBar").classList.remove("hidden"); this.cancel("该文件未开放下载、超过大小限制或已不存在"); };
+        link.onclick = e => { e.preventDefault(); if (this.active) return; $("downloadBar").classList.remove("hidden"); this.cancel(this.supported ? "该文件未开放下载、超过大小限制或已不存在" : "当前中继尚未启用文件下载，请重启中继后刷新页面"); };
       }
     }
   }
@@ -38,6 +38,7 @@ window.FileDownloads = class FileDownloads {
   async start(file, preview) {
     if (this.active) { $("downloadStatus").textContent = "已有文件正在接收，请等待或取消"; return; }
     if (!this.supported || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > this.maxBytes) return;
+    this.clearSaved();
     this.active = { file, preview, chunks: [], offset: 0, requestId: null, timer: null };
     $("downloadBar").classList.remove("hidden"); $("cancelDownload").classList.remove("hidden");
     this.next();
@@ -63,14 +64,14 @@ window.FileDownloads = class FileDownloads {
       if (expected !== null) { this.next(); return; }
       this.active = null; $("cancelDownload").classList.add("hidden");
       const blob = new Blob(task.chunks, { type: task.file.mime || "application/octet-stream" });
+      this.savedUrl = URL.createObjectURL(blob);
+      const save = $("saveDownloadedFile"); save.href = this.savedUrl; save.download = task.file.name; save.classList.remove("hidden");
       if (task.preview && /^image\/(png|jpeg|webp|gif)$/.test(blob.type)) {
         this.clearPreview(); this.previewUrl = URL.createObjectURL(blob);
         window.ImageAttachments.open(this.previewUrl, task.file.name);
         $("downloadStatus").textContent = "已接收图片：" + task.file.name;
       } else {
-        const url = URL.createObjectURL(blob), link = document.createElement("a");
-        link.href = url; link.download = task.file.name; document.body.append(link); link.click(); link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        save.click();
         $("downloadStatus").textContent = "已接收并提交下载：" + task.file.name;
       }
     } catch (error) { this.cancel(error.message || "文件接收失败"); }
@@ -85,5 +86,10 @@ window.FileDownloads = class FileDownloads {
     this.active = null; $("downloadStatus").textContent = message; $("cancelDownload").classList.add("hidden");
   }
   disconnect() { if (this.active) this.cancel("连接已断开，请重新下载"); }
+  clearSaved() {
+    if (this.savedUrl) URL.revokeObjectURL(this.savedUrl);
+    this.savedUrl = null;
+    const save = $("saveDownloadedFile"); save.classList.add("hidden"); save.removeAttribute("href"); save.removeAttribute("download");
+  }
   clearPreview() { if (this.previewUrl) URL.revokeObjectURL(this.previewUrl); this.previewUrl = null; }
 };

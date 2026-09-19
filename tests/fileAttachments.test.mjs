@@ -23,6 +23,12 @@ test("Markdown 文件引用保留空格、中文、绝对路径和行内代码�
   assert.deepEqual(itemToEvent({ type: "imageGeneration", savedPath: "out/a.png", status: "completed" }).fileRefs, ["out/a.png"]);
   assert.deepEqual(itemToEvent({ type: "fileChange", changes: [{ path: "a.xlsx", kind: { type: "add" } }, { path: "gone.pdf", kind: { type: "delete" } }] }).fileRefs, ["a.xlsx"]);
 });
+test("同一文件的相对和绝对链接都映射到同一附件", t => {
+  const { root, store, write } = fixture(t), absolute = write("chart.png");
+  const result = store.decorateEvent({ kind: "item:agentMessage", threadId: "one", fileRefs: ["chart.png", absolute] }, { cwd: root, threadId: "one" });
+  assert.equal(result.files.length, 1);
+  assert.deepEqual(result.files[0].references, ["chart.png", absolute]);
+});
 test("附件必须被登记并绑定会话，二进制分块与原文件逐字节一致", async t => {
   const { store, write } = fixture(t), bytes = crypto.randomBytes(FILE_LIMITS.chunkBytes * 2 + 17);
   write("exports/报表.xlsx", bytes);
@@ -76,7 +82,10 @@ test("大量外部链接不会挤掉本地附件名额，已完成工具事件�
 test("文件变化、删除和会话删除使旧附件失效，空文件仍可下载", async t => {
   const { store, write } = fixture(t);
   const target = write("a.txt"), file = store.register("a.txt", "one");
-  fs.writeFileSync(target, "changed"); await assert.rejects(store.read({ attachmentId: file.id, threadId: "one" }), /变化/);
+  fs.writeFileSync(target, "changed");
+  // 紧邻的同尺寸写入可能共享文件时间戳，显式推进时间以验证元数据变更。
+  const changedAt = new Date(Date.now() + 2000); fs.utimesSync(target, changedAt, changedAt);
+  await assert.rejects(store.read({ attachmentId: file.id, threadId: "one" }), /变化/);
   const updated = store.register("a.txt", "one"); assert.notEqual(updated.id, file.id);
   fs.unlinkSync(target); await assert.rejects(store.read({ attachmentId: updated.id, threadId: "one" }));
   write("empty.txt", ""); const empty = store.register("empty.txt", "one");

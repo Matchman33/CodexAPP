@@ -93,6 +93,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ### 生成文件下载
 
+同一附件可带可选 `references[]`，包含助手对该文件使用的多个路径写法。网页在 Markdown 清理前将已登记的文件链接映射为内部片段标记，图片引用映射为预览，文字链接映射为下载；不会放开 `file:`、Windows 驱动器路径或不安全 URL 协议的浏览器导航。附件始终通过当前连接传输，NPS 入口不需要额外下载端口或回环地址；接收完成后的保存链接使用浏览器本地 Blob。
+
 `hello.fileDownloads` 声明 `{supported:true,maxBytes:33554432,chunkBytes:196608,perEvent:12,entries:512}`。助手消息、文件变更与图片生成事件可以携带 `files[]`：`{id,threadId,name,size,mime,preview,reference}`；`reference` 是原始文件引用，仅供网页关联聊天链接，不能代替下载授权。历史转换保留有界 `fileRefs[]`，保证长文本截断后仍可登记附件。
 
 客户端发送 `{type:"readAttachment",attachmentId,threadId,offset:0,requestId}`。后端响应 `{type:"attachmentChunk",attachmentId,threadId,requestId,offset,total,data,nextOffset}`；`data` 是该块的 Base64，`nextOffset:null` 表示完成，其他值用于请求下一块。客户端逐块校验 ID、会话、位置与总长度，收齐后创建下载文件；取消或断线丢弃未完成内容，不自动重试。错误使用原有 `error` 并回传 `requestId`。

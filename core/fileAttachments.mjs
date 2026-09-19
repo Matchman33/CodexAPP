@@ -81,7 +81,8 @@ export class FileAttachments {
     const files = [], seen = new Set();
     for (const ref of refs.slice(0, FILE_LIMITS.perEvent)) {
       const file = this.register(ref, threadId);
-      if (file && !seen.has(file.id)) { files.push(file); seen.add(file.id); }
+      if (file && !seen.has(file.id)) { files.push({ ...file, references: [ref] }); seen.add(file.id); }
+      else if (file) files.find(known => known.id === file.id).references.push(ref);
     }
     return files.length ? { ...event, files } : event;
   }

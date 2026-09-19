@@ -890,7 +890,7 @@ function setEventText(div, e) {
         if (body.firstChild?.nodeType === Node.TEXT_NODE && body.childNodes.length === 1 && text.startsWith(body._source || "")) body.firstChild.appendData(text.slice((body._source || "").length));
         else body.textContent = text;
       } else {
-        body.innerHTML = window.ChatUI.markdown(text);
+        body.innerHTML = window.ChatUI.markdown(text, e.files || []);
         body.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
       }
     } else body.textContent = text;
