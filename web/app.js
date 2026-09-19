@@ -6,7 +6,6 @@
 const $ = (id) => document.getElementById(id);
 const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
 const fileDownloads = new window.FileDownloads(message => sendWs(message));
-$("cancelDownload").onclick = () => fileDownloads.cancel();
 $("imageDialog").addEventListener("close", () => fileDownloads.clearPreview());
 
 // Request/display IDs must also work on ordinary HTTP IP origins.
@@ -1482,6 +1481,8 @@ function finishThreadAction(error) {
 }
 function forgetDeletedThread(threadId) {
   if (fileDownloads.active?.file.threadId === threadId) fileDownloads.cancel("会话已删除，下载已取消");
+  if (fileDownloads.cached?.file.threadId === threadId) fileDownloads.clearCached();
+  if (fileDownloads.textPreview?.file.threadId === threadId) $("textPreviewDialog").close();
   deletedThreads.add(threadId);
   if (deletedThreads.size > 500) deletedThreads.delete(deletedThreads.values().next().value);
   if (pendingSelection?.threadId === threadId) { clearTimeout(selectionTimer); pendingSelection = null; lastSelectionId = null; }

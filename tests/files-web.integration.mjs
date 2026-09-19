@@ -12,6 +12,7 @@ import WebSocket from "ws";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexapp-file-web-"));
 const workbook = crypto.randomBytes(192 * 1024 * 2 + 257), pdf = Buffer.from("%PDF-1.4\ntransport fixture\n%%EOF");
+const textFixtures = { "notes.txt": "你好，文本预览。\n<script>window.__textExecuted = true</script>\n第二行", "readme.md": "# 文本标题\n\n**保留 Markdown 原文**", "data.json": '{"测试":true}', "data.csv": "名称,数量\n苹果,3", "long.txt": "长文本\n".repeat(220000), "empty.txt": "" };
 let child, browser, observer, proxy;
 const proxySockets = new Set();
 try {
@@ -19,6 +20,10 @@ try {
   await fs.copyFile("relay/server.mjs", path.join(root, "relay/server.mjs"));
   for (const name of ["web", "node_modules"]) await fs.symlink(path.resolve(name), path.join(root, name), process.platform === "win32" ? "junction" : "dir");
   await fs.mkdir(path.join(root, "exports")); await fs.writeFile(path.join(root, "exports/报表.xlsx"), workbook); await fs.writeFile(path.join(root, "exports/report.pdf"), pdf);
+  for (const [name, content] of Object.entries(textFixtures)) await fs.writeFile(path.join(root, "exports", name), content);
+  await fs.writeFile(path.join(root, "exports/gbk.txt"), Buffer.from([0xc4, 0xe3, 0xba, 0xc3]));
+  await fs.writeFile(path.join(root, "exports/utf16.txt"), Buffer.concat([Buffer.from([255, 254]), Buffer.from("UTF-16 中文", "utf16le")]));
+  await fs.writeFile(path.join(root, "exports/binary.txt"), Buffer.from([0, 1, 2, 3]));
   const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));
   const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
   await fs.writeFile(path.join(root, "codexapp.config.json"), JSON.stringify({ codexBin: process.execPath, host: "127.0.0.1", port, token: "files-fixture", defaultCwd: root, preventSleep: false }));
@@ -43,17 +48,18 @@ try {
   browser = await chromium.launch({ channel: process.env.CODEXAPP_TEST_BROWSER || "msedge", headless: true, args: ["--host-resolver-rules=MAP phone-gateway.test 127.0.0.1", "--no-proxy-server"] });
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "block", acceptDownloads: true });
   await context.addInitScript(({ url }) => localStorage.setItem("codexapp.profile", JSON.stringify({ mode: "lan", url, token: "files-fixture" })), { url });
-  const page = await context.newPage(), errors = [], receivedDownloads = [], networkUrls = [];
-  page.on("request", request => networkUrls.push(request.url())); page.on("websocket", socket => networkUrls.push(socket.url()));
+  const page = await context.newPage(), errors = [], receivedDownloads = [], networkUrls = [], attachmentRequests = [];
+  page.on("request", request => networkUrls.push(request.url())); page.on("websocket", socket => { networkUrls.push(socket.url()); socket.on("framesent", frame => { try { const message = JSON.parse(frame.payload); if (message.type === "readAttachment") attachmentRequests.push(message); } catch {} }); });
   page.on("pageerror", error => errors.push(error.message)); page.on("download", d => receivedDownloads.push(d));
   const image = await page.evaluate(() => { const canvas = document.createElement("canvas"); canvas.width = 480; canvas.height = 300; const ctx = canvas.getContext("2d"); ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, 480, 300); ctx.fillStyle = "#15966e"; ctx.fillRect(40, 100, 100, 160); ctx.fillStyle = "#eab841"; ctx.fillRect(180, 45, 100, 215); ctx.fillStyle = "#ce5263"; ctx.fillRect(320, 145, 100, 115); return canvas.toDataURL("image/png").split(",")[1]; });
   await fs.writeFile(path.join(root, "exports/chart.png"), Buffer.from(image, "base64"));
   await page.goto(url); await page.waitForFunction(() => sessionReady);
   await page.locator("#sessionsBtn").click(); await page.locator('.session-item[data-thread-id="one"]').click();
   await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).waitFor();
-  assert.equal(await page.locator(".file-attachment").count(), 3);
+  assert.equal(await page.locator("#downloadBar, #downloadStatus, #saveDownloadedFile, #cancelDownload").count(), 0);
+  assert.equal(await page.locator(".file-attachment").count(), 12);
   await page.getByRole("link", { name: "项目外文件", exact: true }).click();
-  await page.locator("#downloadStatus").filter({ hasText: "未开放下载" }).waitFor(); assert.equal(page.url(), url + "/");
+  await page.locator(".file-message").filter({ hasText: "未开放下载" }).waitFor(); assert.equal(page.url(), url + "/");
   const firstId = await page.evaluate(() => historyFeed.events.find(e => e.files?.length).files[0].id);
   const observed = []; observer = new WebSocket("ws://127.0.0.1:" + port + "/ws?token=files-fixture"); observer.on("message", raw => observed.push(JSON.parse(raw))); await once(observer, "open");
   const downloadFile = async name => {
@@ -65,8 +71,8 @@ try {
   const linkDownload = page.waitForEvent("download");
   await page.getByRole("link", { name: "下载测试图片", exact: true }).click();
   const picture = await linkDownload; assert.equal(picture.suggestedFilename(), "chart.png"); assert.deepEqual(await fs.readFile(await picture.path()), Buffer.from(image, "base64"));
-  // 接收后保留真正的下载链接，让手机浏览器可在用户再次点击时保存。
-  const manualSave = page.waitForEvent("download"); await page.getByRole("link", { name: "保存已接收文件", exact: true }).click();
+  // 手机浏览器可直接再次点击聊天链接保存，不需要单独状态栏。
+  const manualSave = page.waitForEvent("download"); await page.getByRole("link", { name: "下载测试图片", exact: true }).click();
   assert.equal((await manualSave).suggestedFilename(), "chart.png");
   assert(!observed.some(m => m.type === "attachmentChunk"), "文件内容只返回请求方，不向其他客户端广播");
   await page.getByRole("link", { name: "测试图片", exact: true }).click();
@@ -78,20 +84,52 @@ try {
   await page.getByRole("button", { name: "关闭图片预览" }).click();
   await page.evaluate(() => { fileDownloads.configure(null); for (const row of historyFeed.rows.values()) setEventText(row, row._event); });
   await page.getByRole("link", { name: "下载测试图片", exact: true }).click();
-  await page.locator("#downloadStatus").filter({ hasText: "当前中继尚未启用" }).waitFor();
+  await page.locator(".file-message").filter({ hasText: "当前中继尚未启用" }).waitFor();
   await page.reload(); await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).waitFor();
   assert.equal(await page.evaluate(() => historyFeed.events.find(e => e.files?.length).files[0].id), firstId);
   await page.screenshot({ path: "dist-check/files-ui/attachments.png" });
+  for (const name of ["notes.txt", "readme.md", "data.json", "data.csv", "empty.txt"]) {
+    await page.getByRole("button", { name: "预览文本：" + name, exact: true }).click();
+    await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#textPreviewTitle").textContent(), name);
+    assert.equal(await page.locator("#textPreviewContent").textContent(), textFixtures[name]);
+    assert.equal(await page.locator("#textPreviewContent script, #textPreviewContent img").count(), 0);
+    if (name === "notes.txt") {
+      assert.equal(await page.evaluate(() => window.__textExecuted), undefined);
+      await page.screenshot({ path: "dist-check/files-ui/text-preview.png" });
+      const textDownload = page.waitForEvent("download"); await page.getByRole("button", { name: "下载完整文本文件", exact: true }).click();
+      assert.equal((await fs.readFile(await (await textDownload).path())).toString(), textFixtures[name]);
+    } else await page.getByRole("button", { name: "关闭文本预览", exact: true }).click();
+  }
+  await page.getByRole("button", { name: "预览文本：gbk.txt", exact: true }).click(); await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#textPreviewContent").textContent(), "你好");
+  await page.locator("#textPreviewEncoding").selectOption("utf-8"); assert.match(await page.locator("#textPreviewNote").textContent(), /无法按此编码/);
+  await page.locator("#textPreviewEncoding").selectOption("gb18030"); assert.equal(await page.locator("#textPreviewContent").textContent(), "你好");
+  await page.getByRole("button", { name: "关闭文本预览", exact: true }).click();
+  await page.getByRole("button", { name: "预览文本：utf16.txt", exact: true }).click(); await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#textPreviewContent").textContent(), "UTF-16 中文");
+  await page.getByRole("button", { name: "关闭文本预览", exact: true }).click();
+  await page.getByRole("button", { name: "预览文本：binary.txt", exact: true }).click(); await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+  assert.match(await page.locator("#textPreviewNote").textContent(), /内容不是文本/);
+  await page.getByRole("button", { name: "关闭文本预览", exact: true }).click();
+  const requestStart = attachmentRequests.length;
+  await page.getByRole("button", { name: "预览文本：long.txt", exact: true }).click(); await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+  assert.match(await page.locator("#textPreviewNote").textContent(), /仅预览前 1 MiB/);
+  assert(attachmentRequests.slice(requestStart).every(request => request.offset < 1048576), "长文本预览不读取完整文件");
+  assert((await page.locator("#textPreviewContent").textContent()).startsWith("长文本\n"));
+  const completeTextDownload = page.waitForEvent("download"); await page.getByRole("button", { name: "下载完整文本文件", exact: true }).click();
+  assert.equal((await fs.readFile(await (await completeTextDownload).path())).toString(), textFixtures["long.txt"]);
   const downloadsBefore = receivedDownloads.length;
-  await page.evaluate(() => { document.querySelector('[aria-label="下载文件：报表.xlsx"]').click(); $("cancelDownload").click(); });
-  await page.locator("#downloadStatus").filter({ hasText: "已取消" }).waitFor();
+  await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).scrollIntoViewIfNeeded();
+  await page.evaluate(() => { document.querySelector('[aria-label="下载文件：报表.xlsx"]').click(); document.querySelector('[aria-label="取消接收：报表.xlsx"]').click(); });
+  await page.locator(".file-feedback").filter({ hasText: "已取消" }).waitFor();
   assert.equal(await page.evaluate(() => fileDownloads.active), null);
   await page.evaluate(() => { document.querySelector('[aria-label="下载文件：报表.xlsx"]').click(); disposeConnection(); });
-  await page.locator("#downloadStatus").filter({ hasText: "连接已断开" }).waitFor();
+  await page.locator(".file-feedback").filter({ hasText: "连接已断开" }).waitFor();
   await page.evaluate(() => resumeConnection()); await page.waitForFunction(() => sessionReady);
   await fs.writeFile(path.join(root, "exports/报表.xlsx"), "changed during download");
   await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).click();
-  await page.locator("#downloadStatus").filter({ hasText: "变化" }).waitFor();
+  await page.locator(".file-feedback").filter({ hasText: "变化" }).waitFor();
   assert.equal(receivedDownloads.length, downloadsBefore);
   assert.equal((await fetch("http://127.0.0.1:" + proxyPort + "/exports/报表.xlsx")).status, 404);
   const response = once(observer, "message"); observer.send(JSON.stringify({ type: "readAttachment", attachmentId: path.join(root, "codexapp.config.json"), threadId: "one", requestId: "bad" }));
@@ -99,7 +137,7 @@ try {
   assert.deepEqual(errors, []); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert(networkUrls.some(address => address.startsWith("ws://phone-gateway.test:" + proxyPort + "/ws")));
   assert(!networkUrls.some(address => /^(https?|wss?):\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(address)), "手机浏览器不能请求电脑的回环地址");
-  console.log(JSON.stringify({ width: 390, passed: "独立转发入口、绝对路径文字链接下载、Markdown 图片预览、手动保存、无回环地址请求、Excel/PDF 字节一致和原附件回归", modelPromptsSent: 0 }));
+  console.log(JSON.stringify({ width: 390, passed: "无全局下载状态栏、聊天内下载和取消、纯文本预览与安全显示、编码切换、长文本有界预览、NPS 转发和图片/Excel/PDF 回归", modelPromptsSent: 0 }));
 } finally {
   observer?.terminate(); if (browser) await browser.close();
   for (const socket of proxySockets) socket.destroy();
