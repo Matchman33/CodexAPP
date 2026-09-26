@@ -77,12 +77,13 @@ class CodexClient {
   }
   request(method, params) {
     if (this.releasingChild && this.releasingChild === this.child) return Promise.reject(new Error("会话释放期间控制连接重连，请稍后重试"));
+    if (!this.child?.stdin || this.child.stdin.destroyed || this.child.exitCode !== null || this.child.signalCode !== null) return Promise.reject(new Error("Codex 连接已断开"));
     const id = this.nextId++;
     const payload = { jsonrpc: "2.0", id, method };
     if (params !== undefined) payload.params = params;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.child.stdin.write(JSON.stringify(payload) + "\n");
+      this.child.stdin.write(JSON.stringify(payload) + "\n", error => { if (error) { this.pending.delete(id); reject(error); } });
     });
   }
   notify(method, params) {
@@ -146,7 +147,7 @@ function approvalResult(method, optionId) {
 
 
 export class CodexBridge {
-  constructor(config, emit, saveModel) {
+  constructor(config, emit, saveModel, options = {}) {
     this.config = config;
     if (!this.config.defaultCwd) this.config.defaultCwd = os.homedir(); // empty/missing -> home
     this.files = new FileAttachments();
@@ -162,7 +163,7 @@ export class CodexBridge {
     this.eventLog = [];
     this.pendingApprovals = new Map();
     this.commandQueue = Promise.resolve();
-    this.codex = new CodexClient(config.codexBin);
+    this.codex = options.client || new CodexClient(config.codexBin);
     this.permissions = new SessionPermissions(this.state, (method, params) => this.codex.request(method, params), () => this._broadcastState(), (threadId, error) => this.promptQueue.pause(threadId, error));
     this.historyPager = new HistoryPager(this.codex);
     this.history = null;
@@ -184,6 +185,7 @@ export class CodexBridge {
       permissions: this.permissions, pendingApprovals: this.pendingApprovals, changed: () => this._broadcastState(), emit: message => this.emit(message),
       clearCurrent: () => this._clearThread(),
       recycle: async () => {
+        if (options.recycle) return options.recycle();
         this.state.codexConnected = false; this.promptQueue.disconnect(); this._broadcastState();
         await restartIdleCodex(this.codex, () => this._bootstrap());
       },
@@ -443,8 +445,8 @@ export class CodexBridge {
       case "inspectWriter": return this.emit(await this.writers.inspect(m.threadId));
       case "takeoverThread":
         await this.writers.terminate(m.threadId, m.token, m.confirmed === true);
-        this._pushEvent({ kind: "thread", text: "占用进程已退出，正在尝试接续会话" });
-        return this._resumeThread(m.threadId);
+        this._pushEvent({ kind: "thread", text: "原会话占用已解除，正在尝试接续会话" });
+        return this._resumeThread(m.threadId, true);
       case "listModels": return this.emit(await this.models.list(m.cwd || this.state.cwd));
       case "setConfig":
         this.models.update(m);
@@ -541,10 +543,6 @@ export class CodexBridge {
   }
   async _readThread(threadId, paged = false, requestId, checkWriter = false) {
     if (this.state.status === "running") throw new Error("请先停止当前任务再切换会话");
-    if (checkWriter) {
-      const conflict = await this.writers.inspectExternal(threadId);
-      if (conflict) { this.emit({ ...conflict, onOpen: true, requestId }); return; }
-    }
     const page = paged ? await this.historyPager.open(threadId) : null;
     const t = page?.thread || await readThreadHistory(this.codex, threadId);
     await this.lifecycle.beforeSwitch();
@@ -564,17 +562,21 @@ export class CodexBridge {
     this.history = page ? { paged: true, nextCursor: page.nextCursor } : null;
     this.emit({ ...this.snapshot(), requestId });
   }
-  async _resumeThread(threadId) {
+  async _resumeThread(threadId, afterRelease = false) {
     if (this.state.status === "running" && this.state.threadId !== threadId) throw new Error("请先停止当前任务再切换会话");
     if (this.state.threadId !== threadId) await this.lifecycle.beforeSwitch();
     let res;
     const requested = this.permissions.selection();
-    try {
-      res = await this.codex.request("thread/resume", { threadId, ...requested, ...(this.history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
-    } catch (error) {
-      if (!isWriterConflict(error)) throw error;
-      this.emit(await this.writers.inspect(threadId));
-      return;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await this.codex.request("thread/resume", { threadId, ...requested, ...(this.history ? { excludeTurns: true, initialTurnsPage: { limit: 1, sortDirection: "desc", itemsView: "summary" } } : {}) });
+        break;
+      } catch (error) {
+        if (!isWriterConflict(error)) throw new Error((afterRelease ? "原占用已解除，但接续失败：" : "") + error.message);
+        const conflict = await this.writers.inspect(threadId);
+        if (!afterRelease || attempt >= 2 || conflict.owners?.length || conflict.inspectionFailed) { this.emit(conflict); return; }
+        await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+      }
     }
     const t = res?.thread || {};
     this.promptQueue.select(t.id || threadId);

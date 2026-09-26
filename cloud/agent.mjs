@@ -17,7 +17,8 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { exec } from "node:child_process";
 import { WebSocket } from "ws";
-import { CodexBridge } from "../core/codexBridge.mjs";
+import { SessionHub } from "../core/sessionHub.mjs";
+import { enableServiceRestart, hostRestart } from "../core/serviceRestart.mjs";
 import { persistModel } from "../core/modelSettings.mjs";
 import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 import { loadOrCreateKeyPair, seal, open, fingerprint, sas } from "./e2e.mjs";
@@ -118,12 +119,14 @@ let membershipWait = false; // true after a membership_required rejection (slow 
 let running = false;        // user has logged in / wants to be connected
 let authToken = null;       // cached JWT — reuse across WS reconnects (avoid re-login storms)
 
-const bridge = new CodexBridge(config, (msg) => {
+const bridge = new SessionHub(config, (msg) => {
   status.codexConnected = !!bridge.state.codexConnected;
   // CodexApp data only flows to a PAIRED phone.
   if (!trusted || !phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type: "e2e", ...seal(msg, phonePubkey, keys.secretKey) }));
-}, (model, settings) => persistModel(CONFIG_FILE, model, settings));
+}, (model, settings) => persistModel(CONFIG_FILE, model, settings), { dataDir: process.env.CODEXAPP_DATA_DIR || path.join(path.dirname(CONFIG_FILE), "sessions") });
+enableServiceRestart(bridge, hostRestart(() => bridge.stop()));
+let queuesRestored = false;
 
 function sendCtrl(obj) {
   if (!phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -186,7 +189,7 @@ function connect(token) {
     }
     if (m.type === "peer") {
       if (m.online) onPhoneOnline(m.pubkey);
-      else { phonePubkey = null; trusted = false; setStatus({ phase: "waitingPeer", peerOnline: false, paired: false }); console.log("[agent] phone offline"); }
+      else { for (const id of bridge.terminals.records.values()) for (const clientId of [...id.viewers.keys()]) bridge.terminals.detach(clientId); phonePubkey = null; trusted = false; setStatus({ phase: "waitingPeer", peerOnline: false, paired: false }); console.log("[agent] phone offline"); }
       return;
     }
     if (m.type === "e2e") {
@@ -197,7 +200,7 @@ function connect(token) {
         else sendCtrl({ type: "needPairing" }); // ignore commands until paired
         return;
       }
-      bridge.dispatch(inner).catch((e) => sendCtrl({ type: "error", message: e.message, requestId: inner.requestId }));
+      bridge.dispatch(inner).catch((e) => sendCtrl({ type: "error", message: e.message, requestId: inner.requestId, clientId: inner.clientId, threadId: inner.threadId, terminalId: inner.terminalId }));
       return;
     }
     if (m.type === "error") {
@@ -212,6 +215,7 @@ function connect(token) {
     }
   });
   ws.on("close", () => {
+    for (const terminal of bridge.terminals.records.values()) for (const clientId of [...terminal.viewers.keys()]) bridge.terminals.detach(clientId);
     phonePubkey = null; trusted = false;
     setStatus({ brokerConnected: false, peerOnline: false, paired: false });
     if (!running) { setStatus({ phase: "needLogin" }); return; }
@@ -231,6 +235,7 @@ async function startAgent() {
     if (!authToken) { setStatus({ phase: "loggingIn", email: config.email, error: "" }); authToken = await login(); } // reuse token across reconnects
     setStatus({ phase: "startingCodex" });
     if (!bridge.state.codexConnected) await bridge.start();
+    if (!queuesRestored) { bridge.restoreQueues(); queuesRestored = true; }
     status.codexConnected = !!bridge.state.codexConnected;
     setStatus({ phase: "connecting" });
     connect(authToken);

@@ -12,6 +12,7 @@ cloud/codexapp.db-shm
 cloud/codexapp.db-wal
 cloud/broker.secret
 cloud/.last-token.txt
+cloud/sessions/
 cloud/certs/
 **/*.pem
 
@@ -32,6 +33,9 @@ dist-check/
 **/dist-check/
 web-build/
 web/vendor/chat-ui.js
+web/vendor/terminal.js
+web/vendor/terminal.css
+desktop/terminalPtyWorker.cjs
 
 # frp 本地配置、部署密钥、客户端包与证书
 deploy/frp/runtime/

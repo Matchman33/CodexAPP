@@ -58,7 +58,7 @@ try {
   await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).waitFor();
   assert.equal(await page.locator("#downloadBar, #downloadStatus, #saveDownloadedFile, #cancelDownload").count(), 0);
   assert.equal(await page.locator(".file-attachment").count(), 12);
-  await page.getByRole("link", { name: "项目外文件", exact: true }).click();
+  await page.getByRole("button", { name: "项目外文件", exact: true }).click();
   await page.locator(".file-message").filter({ hasText: "未开放下载" }).waitFor(); assert.equal(page.url(), url + "/");
   const firstId = await page.evaluate(() => historyFeed.events.find(e => e.files?.length).files[0].id);
   const observed = []; observer = new WebSocket("ws://127.0.0.1:" + port + "/ws?token=files-fixture"); observer.on("message", raw => observed.push(JSON.parse(raw))); await once(observer, "open");
@@ -83,7 +83,7 @@ try {
   await fs.mkdir("dist-check/files-ui", { recursive: true }); await page.screenshot({ path: "dist-check/files-ui/image-preview.png" });
   await page.getByRole("button", { name: "关闭图片预览" }).click();
   await page.evaluate(() => { fileDownloads.configure(null); for (const row of historyFeed.rows.values()) setEventText(row, row._event); });
-  await page.getByRole("link", { name: "下载测试图片", exact: true }).click();
+  await page.getByRole("button", { name: "下载测试图片", exact: true }).click();
   await page.locator(".file-message").filter({ hasText: "当前中继尚未启用" }).waitFor();
   await page.reload(); await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).waitFor();
   assert.equal(await page.evaluate(() => historyFeed.events.find(e => e.files?.length).files[0].id), firstId);

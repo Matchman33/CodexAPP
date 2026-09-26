@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "CodexApp 电脑客户端 (native desktop)",
   "main": "main.js",
+  "dependencies": { "node-pty": "1.1.0" },
   "scripts": {
     "bundle": "node build.mjs",
     "start": "node build.mjs && electron .",
@@ -21,8 +22,10 @@
     "files": [
       "main.js",
       "agent.cjs",
+      "terminalPtyWorker.cjs",
       "package.json"
     ],
+    "asarUnpack": ["**/node_modules/node-pty/**", "terminalPtyWorker.cjs"],
     "win": {
       "target": "nsis",
       "artifactName": "CodexApp-Setup-${version}.${ext}"

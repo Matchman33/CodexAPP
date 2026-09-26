@@ -53,6 +53,52 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent2); }
 #threadTitle { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
 #cwdLabel { font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; text-align: right; }
 .conversation { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.session-tabs { display: flex; overflow-x: auto; flex: 0 0 auto; min-height: 42px; gap: 4px; border-bottom: 1px solid var(--line); padding: 0 12px; }
+.session-tab { display: flex; align-items: center; flex: 0 0 auto; max-width: 220px; border-bottom: 2px solid transparent; }
+.session-tab.active { border-color: var(--accent); }
+.session-tab > button:first-child { background: transparent; border: 0; padding: 10px 6px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab .icon-btn { width: 28px; height: 28px; flex-basis: 28px; padding: 6px; }
+.session-path { overflow-wrap: anywhere; max-height: 80px; overflow: auto; }
+.watch-status { margin: 4px 20px; color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+.terminal-panel { position: fixed; z-index: 60; inset: 24px max(16px, calc((100vw - 1100px) / 2)); display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
+.terminal-header { display: flex; align-items: center; gap: 2px; padding: 8px; flex: 0 0 auto; }
+.terminal-header strong { font-size: 14px; margin: 0 8px; white-space: nowrap; }
+.terminal-header select { flex: 1; min-width: 60px; padding: 6px; font-size: 12px; }
+.terminal-header .icon-btn { width: 32px; height: 32px; flex-basis: 32px; padding: 7px; }
+.terminal-info { display: flex; justify-content: space-between; gap: 12px; margin: 0 12px; font-size: 11px; color: var(--muted); }
+.terminal-info > :first-child { min-width: 0; overflow-wrap: anywhere; }
+.terminal-info > :last-child { flex-shrink: 0; }
+.terminal-cwd { padding: 4px 12px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+.terminal-viewport { flex: 1; min-height: 0; min-width: 0; padding: 8px; background: #171717; overflow-y: auto; overflow-x: hidden; }
+.terminal-width { width: 100px; max-width: 35%; flex: 0 0 auto; padding: 3px 6px; font-size: 12px; border-radius: 4px; }
+.terminal-horizontal-bar { flex: 0 0 24px; padding: 0 8px; background: #171717; }
+#terminalHorizontalScroll { appearance: none; -webkit-appearance: none; display: block; width: 100%; height: 24px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: ew-resize; touch-action: pan-y; }
+#terminalHorizontalScroll::-webkit-slider-runnable-track { height: 10px; border-radius: 4px; background: #333333; }
+#terminalHorizontalScroll::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: var(--thumb-width, 40px); height: 14px; margin-top: -2px; border: 0; border-radius: 4px; background: #969696; }
+#terminalHorizontalScroll::-moz-range-track { height: 10px; border-radius: 4px; background: #333333; }
+#terminalHorizontalScroll::-moz-range-thumb { width: var(--thumb-width, 40px); height: 14px; border: 0; border-radius: 4px; background: #969696; }
+#terminalHorizontalScroll:active::-webkit-slider-thumb { background: #cccccc; }
+.terminal-surface { height: 100%; width: 100%; min-width: 0; touch-action: none; }
+.terminal-viewport .xterm { height: 100%; }
+.terminal-viewport.has-scrollback .xterm .xterm-scrollable-element > .scrollbar.vertical { opacity: 1; pointer-events: auto; z-index: 11; background: #ffffff12; }
+.terminal-viewport.drag-mode .xterm { cursor: grab; }
+.terminal-viewport.dragging .xterm { cursor: grabbing; }
+.terminal-navigation { display: flex; gap: 4px; align-items: center; padding: 2px 8px 6px; flex-shrink: 0; }
+.terminal-navigation .icon-btn { width: 32px; height: 32px; flex-basis: 32px; padding: 7px; border-radius: 4px; }
+.terminal-navigation .icon-btn[aria-pressed="true"] { background: var(--card2); color: var(--accent); }
+.terminal-zoom-value { min-width: 40px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.terminal-scroll-position { flex: 1; min-width: 0; text-align: right; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.terminal-keys { display: flex; gap: 4px; align-items: center; padding: 4px 8px max(4px, env(safe-area-inset-bottom)); flex-shrink: 0; overflow-x: auto; }
+.terminal-key { border: 1px solid var(--line); background: var(--bg2); border-radius: 4px; padding: 6px; min-height: 32px; font-size: 12px; }
+.terminal-keys .icon-btn { width: 32px; height: 32px; flex-basis: 32px; padding: 7px; }
+.terminal-dialog { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); overflow: auto; padding: 24px; }
+.terminal-dialog h2 { font-size: 18px; margin: 0 0 12px; }
+.terminal-dialog p { margin: 0; font-size: 14px; line-height: 1.65; color: var(--muted); }
+.terminal-dialog .actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.terminal-dialog .actions .btn { display: inline-flex; align-items: center; justify-content: center; min-width: 104px; min-height: 44px; }
+.terminal-dialog::backdrop { background: #0006; }
+@media (max-width: 600px) { .terminal-dialog { padding: 20px; } .terminal-dialog .actions .btn { flex: 1; min-width: 0; } }
+@media (max-width: 600px) { .terminal-panel { inset: 0; height: var(--app-height, 100dvh); border: 0; border-radius: 0; } }
 .feed { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; padding: 18px max(20px, calc((100% - 760px) / 2)); display: block; -webkit-overflow-scrolling: touch; overflow-anchor: none; }
 .history-spacer { width: 100%; pointer-events: none; }
 .feed > .entry { margin-bottom: 20px; }
@@ -97,6 +143,7 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .markdown ul, .markdown ol { padding-left: 24px; margin: 10px 0 16px; }
 .markdown li { margin: 4px 0; }
 .markdown a { color: var(--accent2); text-decoration: underline; overflow-wrap: anywhere; }
+.markdown a[role="button"] { cursor: pointer; }
 .markdown pre { background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-width: 100%; overflow: auto; font-size: 12px; line-height: 1.6; white-space: pre; }
 .markdown code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; }
 .markdown :not(pre) > code { background: var(--bg2); padding: 2px 4px; border-radius: 4px; }
@@ -238,8 +285,8 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .thread-action-dialog h2 { margin: 0 0 14px; font-size: 20px; }
 .thread-action-dialog p { overflow-wrap: anywhere; line-height: 1.6; }
 #threadActionName { font-weight: 600; }
-#releaseThreadBtn { display: flex; align-items: center; justify-content: center; gap: 8px; }
-#releaseThreadBtn svg { width: 18px; height: 18px; }
+#releaseThreadBtn, #restartServiceBtn, #cancelRestartBtn, #restartConfirm { display: flex; align-items: center; justify-content: center; gap: 8px; }
+#releaseThreadBtn svg, #restartServiceBtn svg, #cancelRestartBtn svg, #restartConfirm svg { width: 18px; height: 18px; }
 .s-name { color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s-meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
 @media (max-width: 430px) { .model-trigger span { display: none; } .topbar { gap: 0; } .topinfo { gap: 4px; } .topinfo .pill { max-width: 65px; } .empty-state h1 { font-size: 22px; } }

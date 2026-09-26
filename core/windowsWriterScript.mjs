@@ -72,7 +72,7 @@ public static class CodexWriterLocks {
 
 $target = [IO.Path]::GetFullPath($LockFile)
 if (!(Test-Path -LiteralPath $target -PathType Leaf)) {
-  if ($Action -eq 'terminate') { throw 'Writer lock no longer exists; inspect again' }
+  if ($Action -eq 'terminate') { '{"terminated":true,"released":true}'; exit 0 }
   '{"owners":[]}'
   exit 0
 }
@@ -88,6 +88,7 @@ function Get-AffectedThreads($Owner) {
   return @($ids | Sort-Object -Unique)
 }
 if ($Action -eq 'terminate') {
+  if ($owners.Count -eq 0) { '{"terminated":true,"released":true}'; exit 0 }
   $owner = @($owners | Where-Object { $_.Process.Pid -eq $WriterPid -and [CodexWriterLocks]::Started($_) -eq $WriterStarted })
   if ($owners.Count -ne 1 -or $owner.Count -ne 1) { throw 'Writer changed; inspect again before terminating' }
   $affected = @(Get-AffectedThreads $owner[0])

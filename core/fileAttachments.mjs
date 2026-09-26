@@ -4,6 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { marked } from "marked";
+import { localFileTarget } from "./linkTargets.mjs";
 
 export const FILE_LIMITS = { maxBytes: 32 * 1024 * 1024, chunkBytes: 192 * 1024, perEvent: 12, entries: 512 };
 const imageTypes = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
@@ -20,8 +21,9 @@ export function fileReferences(text) {
     marked.walkTokens(marked.lexer(String(text || "").slice(0, 262144)), token => {
       if (refs.length >= FILE_LIMITS.perEvent) return;
       const value = ["link", "image"].includes(token.type) ? token.href : token.type === "codespan" ? token.text : null;
-      if (typeof value === "string" && value.length <= 4096 && !/^(https?:|data:|javascript:)/i.test(value)) {
-        try { if (extensions.has(path.extname(decodeURIComponent(value)).toLowerCase())) refs.push(value); } catch {}
+      const target = localFileTarget(value);
+      if (typeof value === "string" && value.length <= 4096 && target !== null) {
+        try { if (extensions.has(path.extname(decodeURIComponent(target)).toLowerCase())) refs.push(value); } catch {}
       }
     });
   } catch {}
@@ -47,10 +49,11 @@ export class FileAttachments {
     const scope = this.roots.get(threadId), root = scope?.root;
     if (!root || typeof reference !== "string" || reference.length > 4096) return null;
     try {
-      let target = reference;
-      if (target.startsWith("file:")) target = fileURLToPath(target);
+      let target = localFileTarget(reference);
+      if (target === null) return null;
+      if (/^file:/i.test(target)) target = fileURLToPath(target);
       else {
-        if (target.startsWith("sandbox:")) target = target.slice(8);
+        if (/^sandbox:/i.test(target)) target = target.slice(8);
         else if (/^[a-z][a-z\d+.-]*:/i.test(target) && !/^[a-z]:[\\/]/i.test(target)) return null;
         target = decodeURIComponent(target);
       }
@@ -87,12 +90,12 @@ export class FileAttachments {
     return files.length ? { ...event, files } : event;
   }
   decorate(message, state) {
-    if (!["hello", "event", "historyPage", "threadDeleted"].includes(message.type)) return message;
+    if (!["hello", "event", "historyPage", "historyUpdate", "threadDeleted"].includes(message.type)) return message;
     this.remember(state.threadId, state.cwd);
     if (message.type === "threadDeleted") this.forget(message.threadId);
     if (message.type === "hello") return { ...message, fileDownloads: { supported: true, ...FILE_LIMITS }, recentEvents: (message.recentEvents || []).map(event => this.decorateEvent(event, state)) };
     if (message.type === "event") return { ...message, event: this.decorateEvent(message.event, state) };
-    if (message.type === "historyPage") return { ...message, events: (message.events || []).map(event => this.decorateEvent(event, state)) };
+    if (["historyPage", "historyUpdate"].includes(message.type)) return { ...message, events: (message.events || []).map(event => this.decorateEvent(event, state)) };
     return message;
   }
   async read({ attachmentId, threadId, offset = 0, requestId }) {

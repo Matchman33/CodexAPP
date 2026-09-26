@@ -6,6 +6,7 @@
 const $ = (id) => document.getElementById(id);
 const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
 const fileDownloads = new window.FileDownloads(message => sendWs(message));
+const webTerminal = new window.WebTerminal(message => sendWs(message), () => ({ clientId: sessionClientId, threadId: appState.threadId, profile: viewKey() }));
 $("imageDialog").addEventListener("close", () => fileDownloads.clearPreview());
 
 // Request/display IDs must also work on ordinary HTTP IP origins.
@@ -54,6 +55,79 @@ let pendingPrompt = null;
 let promptTimer = null;
 let queueExpanded = true;
 let appState = {};
+const sessionClientId = "web-" + newClientId();
+let multiSession = false, serviceRestart = { phase: "idle" };
+let historyEpoch = null;
+let sessionSummaries = [], watchRequest = null, watchAfter = 0, watchDelay = 2000;
+const sessionViews = new Map(), closedTabs = new Set();
+const unreadSessions = new Set(), sessionRevisions = new Map();
+function viewKey() { return "codexapp.open." + profile.mode + ":" + (profile.url || location.origin); }
+function saveSessionView() {
+  if (!multiSession || !appState.threadId) return;
+  clearTimeout(promptTimer);
+  sessionViews.set(appState.threadId, { epoch: historyEpoch, text: $("input").value, images: attachments.items, pendingPrompt, pendingDirect,
+    scroll: $("feed").scrollTop, followLatest, pages: [...pageCache], historyPages: [...historyPages], overlay: [...recentOverlay], oldestPage, newestPage });
+  // Only eight inactive history windows are retained; drafts and pending sends stay available.
+  const cached = [...sessionViews.values()].filter(v => v.pages);
+  for (const v of cached.slice(0, Math.max(0, cached.length - 8))) { delete v.pages; delete v.historyPages; delete v.overlay; }
+}
+function restoreSessionView() {
+  const v = sessionViews.get(appState.threadId);
+  $("input").value = v?.text || ""; attachments.items = v?.images || [];
+  pendingPrompt = v?.pendingPrompt || null; pendingDirect = v?.pendingDirect || null;
+  if (pendingPrompt) {
+    pendingPrompt.waiting = false;
+    if (promptQueueState?.acceptedRequestIds?.includes(pendingPrompt.requestId)) acceptPrompt(pendingPrompt.requestId);
+  }
+  attachments.render();
+  if (v?.pages && v.epoch === historyEpoch && !v.followLatest) {
+    pageCache.clear(); for (const [i, events] of v.pages) pageCache.set(i, events);
+    historyPages = v.historyPages; recentOverlay.clear(); for (const [id, e] of v.overlay) recentOverlay.set(id, e);
+    oldestPage = v.oldestPage; newestPage = v.newestPage; followLatest = false;
+    showCachedHistory(false); requestAnimationFrame(() => { $("feed").scrollTop = v.scroll; });
+  }
+  updateComposer(); updateHistoryControls();
+}
+function renderSessionTabs() {
+  unreadSessions.delete(appState.threadId);
+  const host = $("sessionTabs"); host.replaceChildren(); host.classList.toggle("hidden", !multiSession);
+  for (const s of sessionSummaries) {
+    if (closedTabs.has(s.threadId) && s.status !== "running" && !s.approvals && !s.queued) continue;
+    const row = document.createElement("div"); row.className = "session-tab" + (s.threadId === appState.threadId ? " active" : "");
+    const button = document.createElement("button"); button.type = "button";
+    button.textContent = (s.approvals ? "待审批 · " : s.status === "running" ? "运行中 · " : s.queued ? "待执行 · " : unreadSessions.has(s.threadId) ? "新消息 · " : "") + (s.projectless ? "临时 · " : "") + s.name;
+    button.title = button.textContent; button.onclick = () => selectHistoryThread(s.threadId); row.append(button);
+    const close = document.createElement("button"); close.className = "icon-btn"; close.title = "关闭标签"; close.setAttribute("aria-label", "关闭标签：" + s.name); close.innerHTML = '<i data-lucide="x"></i>';
+    close.onclick = () => {
+      if (s.threadId === appState.threadId) saveSessionView();
+      closedTabs.add(s.threadId); sendWs({ type: "closeThread", threadId: s.threadId });
+      if (s.threadId === appState.threadId) {
+        const next = sessionSummaries.find(other => other.threadId !== s.threadId && !closedTabs.has(other.threadId));
+        if (next) selectHistoryThread(next.threadId);
+        else {
+          sessionStorage.removeItem(viewKey());
+          appState = { ...appState, threadId: null, turnId: null, threadName: null, cwd: "", status: "idle", readOnly: false, projectless: false };
+          historyFeed.replace([], true); pageCache.clear(); recentOverlay.clear(); historyPages = []; pagedHistory = false;
+          pendingPrompt = pendingDirect = null; $("input").value = ""; attachments.items = []; attachments.render();
+          promptQueueState = null; $("approvals").replaceChildren(); setDiff(""); applyState(); renderPromptQueue(); updateHistoryControls();
+        }
+      }
+      renderSessionTabs();
+    };
+    row.append(close); host.append(row);
+  }
+  window.ChatUI.icons(host);
+  const active = host.querySelector(".active");
+  if (active && host.dataset.active !== appState.threadId) { active.scrollIntoView({ block: "nearest", inline: "nearest" }); host.dataset.active = appState.threadId; }
+}
+function renderServiceRestart() {
+  const pending = serviceRestart.phase && serviceRestart.phase !== "idle";
+  $("restartServiceBtn").disabled = !serviceRestart.supported || pending || !sessionReady;
+  $("restartServiceBtn").title = serviceRestart.supported ? "重启当前连接的项目服务" : "当前启动方式不支持，请使用 npm start";
+  $("cancelRestartBtn").classList.toggle("hidden", serviceRestart.phase !== "waiting");
+  $("serviceStatus").textContent = serviceRestart.error || (serviceRestart.phase === "waiting" ? "等待当前任务结束后重启" : serviceRestart.phase === "restarting" ? "正在重启，等待重新连接" : "");
+  $("serviceStatus").classList.toggle("hidden", !$("serviceStatus").textContent); updateComposer();
+}
 let modelCatalog = [];
 let defaultModel = null;
 let defaultReasoningEffort = null;
@@ -309,6 +383,7 @@ function connect() {
 }
 
 function disposeConnection() {
+  webTerminal.disconnect();
   fileDownloads.disconnect();
   clearTimeout(promptTimer);
   if (pendingPrompt) { pendingPrompt.waiting = false; $("promptStatus").textContent = "连接中断，消息受理状态待确认"; }
@@ -355,6 +430,7 @@ function relaySocketUrl(url, token) {
   parsed.search = ""; parsed.hash = "";
   parsed.searchParams.set("token", token);
   parsed.searchParams.set("history", "paged");
+  parsed.searchParams.set("clientId", sessionClientId);
   return parsed.href;
 }
 function connectLan(attempt) {
@@ -463,6 +539,10 @@ function scheduleReconnect(label = "连接已断开，正在重试") {
 }
 
 function sendWs(obj) {
+  if (multiSession) {
+    obj = { ...obj, clientId: sessionClientId };
+    if (!["newThread", "listThreads", "restartService", "cancelRestart"].includes(obj.type) && !Object.hasOwn(obj, "threadId") && appState.threadId) obj.threadId = appState.threadId;
+  }
   if (["newThread", "getState"].includes(obj.type)) obj = { ...obj, historyMode: "paged" };
   if (!sessionReady || !ws || ws.readyState !== WebSocket.OPEN) return false;
   try {
@@ -494,8 +574,31 @@ $("reconnectBtn").onclick = resumeConnection;
 // Inbound message handling
 // ---------------------------------------------------------------------------
 function handle(m) {
+  if (m.clientId && m.clientId !== sessionClientId && m.clientId !== "legacy") return;
+  if (webTerminal.receive(m)) return;
+  if (multiSession && m.type === "error" && m.threadId && m.threadId !== appState.threadId && pendingSelection?.threadId !== m.threadId && !m.requestId?.startsWith("file-") && m.requestId !== threadActionPending?.requestId) {
+    const v = sessionViews.get(m.threadId);
+    if (v?.pendingPrompt?.requestId === m.requestId) v.pendingPrompt.waiting = false;
+    return;
+  }
+  if (multiSession && m.threadId && m.threadId !== appState.threadId && !["hello", "sessions", "threadDeleted", "historyPage", "historyItem", "attachmentChunk", "error"].includes(m.type)) {
+    if (m.type === "promptAccepted") {
+      const v = sessionViews.get(m.threadId);
+      if (v?.pendingPrompt?.requestId === m.requestId) { if (v.text.trim() === v.pendingPrompt.text) v.text = ""; v.images = v.images.filter(i => !v.pendingPrompt.imageIds.includes(i.id)); v.pendingPrompt = null; }
+    }
+    return;
+  }
   switch (m.type) {
     case "hello":
+      multiSession = !!m.multiSession?.supported;
+      if (multiSession) {
+        serviceRestart = m.serviceRestart || serviceRestart;
+        if (m.sessions) sessionSummaries = m.sessions;
+        if (!m.state?.threadId && !m.requestId && !pendingSelection) {
+          const saved = appState.threadId || sessionStorage.getItem(viewKey());
+          if (saved && !deletedThreads.has(saved)) { sessionReady = true; selectHistoryThread(saved); return; }
+        }
+      }
       if (deletedThreads.has(m.state?.threadId)) break;
       if (m.requestId?.startsWith(historyClientId + "-select-") && m.requestId !== lastSelectionId) break;
       if (pendingSelection && (m.requestId ? m.requestId !== pendingSelection.requestId : m.state?.threadId !== pendingSelection.threadId)) break;
@@ -510,7 +613,12 @@ function handle(m) {
       clearTimeout(writerTimer);
       writerPending = null; writerConflict = null;
       $("writerSheet").classList.add("hidden");
+      const switched = multiSession && appState.threadId !== m.state?.threadId;
+      if (switched) saveSessionView();
       appState = m.state || {};
+      webTerminal.configure(m.terminal);
+      historyEpoch = m.historyEpoch || null;
+      if (multiSession && appState.threadId) { sessionStorage.setItem(viewKey(), appState.threadId); closedTabs.delete(appState.threadId); }
       threadManagement = m.threadManagement || {};
       imageUploadSupported = !!m.imageUpload?.supported;
       fileDownloads.configure(m.fileDownloads);
@@ -539,8 +647,33 @@ function handle(m) {
       setDiff(m.diff || "");
       scrollFeed();
       if (!lastProjectTree) loadSessions();
-      if (pagedHistory && !m.requestId) requestHistoryPage(0, true);
+      if (multiSession) { if (switched) restoreSessionView(); renderSessionTabs(); renderServiceRestart(); }
+      if (pagedHistory && !m.requestId && followLatest) requestHistoryPage(0, true);
       if (!pagedHistory && !requestedPagedMode) { requestedPagedMode = true; sendWs({ type: "getState", historyMode: "paged" }); }
+      break;
+    case "sessions":
+      sessionSummaries = m.sessions || [];
+      for (const s of sessionSummaries) {
+        if (sessionRevisions.has(s.threadId) && sessionRevisions.get(s.threadId) !== s.revision && s.threadId !== appState.threadId) unreadSessions.add(s.threadId);
+        sessionRevisions.set(s.threadId, s.revision);
+      }
+      renderSessionTabs(); break;
+    case "serviceRestart":
+      serviceRestart = m; renderServiceRestart();
+      if (m.phase === "restarting") setTimeout(() => { if (serviceRestart.phase === "restarting" && !sessionReady) { serviceRestart.error = "重启后尚未恢复连接，请查看电脑端启动日志"; renderServiceRestart(); } }, 30000);
+      break;
+    case "connectionState":
+      appState.codexConnected = m.codexConnected; applyState(); break;
+    case "historyUpdate":
+      if (m.requestId !== watchRequest?.requestId) break;
+      watchRequest = null; watchDelay = 2000; watchAfter = Date.now() + watchDelay;
+      if (m.skipped) break;
+      $("watchStatus").textContent = "只读同步 · " + new Date(m.syncedAt).toLocaleTimeString();
+      if (newestPage === 0 && !pageRequest) {
+        pageCache.set(0, m.events || []); recentOverlay.clear();
+        historyPages[0] = { cursor: null, nextCursor: m.nextCursor };
+        showCachedHistory(followLatest); updateHistoryControls();
+      }
       break;
     case "state":
       if (deletedThreads.has(m.state?.threadId)) break;
@@ -566,7 +699,7 @@ function handle(m) {
         const create = pendingConfig.newThread;
         clearTimeout(configTimer);
         pendingConfig = null;
-        if (create) sendWs({ type: "newThread", cwd: $("cfgCwd").value.trim() || undefined });
+        if (create) quickNewThread();
         $("sheet").classList.add("hidden");
         updateSettingsButtons();
       }
@@ -632,6 +765,8 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (m.requestId === watchRequest?.requestId) { watchRequest = null; watchDelay = Math.min(30000, watchDelay * 2); watchAfter = Date.now() + watchDelay; $("watchStatus").textContent = "同步失败：" + m.message; break; }
+      if (m.requestId?.startsWith("restart-")) { serviceRestart = { ...serviceRestart, phase: "idle", error: m.message }; renderServiceRestart(); break; }
       if (fileDownloads.error(m)) break;
       if (m.requestId && m.requestId === threadActionPending?.requestId) { finishThreadAction(m.message); break; }
       if (pendingPrompt && pendingPrompt.requestId === m.requestId) {
@@ -714,13 +849,17 @@ function applyState() {
   $("effortBtn").title = "思考等级：" + effortName(appState.reasoningEffort) + (appState.effectiveReasoningEffort ? "；当前任务：" + effortName(appState.effectiveReasoningEffort) : "");
   document.querySelectorAll(".session-item").forEach((item) => item.classList.toggle("active", item.dataset.threadId === appState.threadId));
   updateComposer();
+  $("watchStatus").classList.toggle("hidden", !multiSession || !appState.readOnly || !appState.threadId);
+  if (multiSession && appState.readOnly && !$("watchStatus").textContent) $("watchStatus").textContent = "只读同步";
 }
 
 // ---------------------------------------------------------------------------
 // Feed rendering
 // ---------------------------------------------------------------------------
-function selectHistoryThread(threadId, checkWriter = true) {
-  if (threadActionPending || appState.threadAction || writerPending || deletedThreads.has(threadId)) return;
+function selectHistoryThread(threadId, checkWriter = false) {
+  if (pendingConfig || threadActionPending || appState.threadAction || writerPending || deletedThreads.has(threadId)) return;
+  if (attachments.busy) return;
+  saveSessionView(); watchRequest = null; watchAfter = 0;
   const requestId = historyClientId + "-select-" + newClientId();
   if (!sendWs({ type: "readThread", threadId, historyMode: "paged", requestId, checkWriter })) return;
   writerConflict = null; writerChoice = null; $("writerSheet").classList.add("hidden");
@@ -1123,7 +1262,7 @@ function updateComposer() {
   $("retryPrompt").classList.toggle("hidden", !pendingPrompt || pendingPrompt.waiting);
   $("retryPrompt").disabled = !connected || !!pendingSelection || managing;
   $("queuePause").disabled = !connected || !!pendingSelection || managing;
-  $("quickNewThread").disabled = $("sidebarNewThread").disabled = appState.status === "running" || !connected || managing;
+  $("quickNewThread").disabled = $("sidebarNewThread").disabled = (!multiSession && appState.status === "running") || !connected || managing;
   $("releaseThreadBtn").disabled = !threadManagement.release || !appState.threadId || !connected || appState.status === "running" || !!pendingSelection || !!pendingPrompt || managing || appState.writerReleased === true;
   document.querySelectorAll(".session-delete").forEach(button => { button.disabled = !threadManagement.delete || !connected || appState.status === "running" || !!pendingSelection || !!pendingPrompt || managing; });
   $("threadActionConfirm").disabled = !connected || managing || appState.status === "running" || !!pendingPrompt || !!pendingSelection;
@@ -1270,7 +1409,7 @@ function renderEffortOptions(selected = selectedEffort()) {
 }
 function updateSettingsButtons() {
   $("cfgApply").disabled = !!pendingConfig || !!threadActionPending || !!appState.threadAction;
-  $("newThreadBtn").disabled = !!pendingConfig || !!threadActionPending || !!appState.threadAction || appState.status === "running";
+  $("newThreadBtn").disabled = !!pendingConfig || !!threadActionPending || !!appState.threadAction || (!multiSession && appState.status === "running");
 }
 
 function renderPermissions() {
@@ -1348,9 +1487,30 @@ function saveSettings(newThread = false) {
 $("cfgApply").onclick = () => saveSettings();
 $("newThreadBtn").onclick = () => saveSettings(true);
 function quickNewThread() {
-  if (appState.status === "running" || threadActionPending || appState.threadAction) return;
-  if (sendWs({ type: "newThread" })) $("sessionsSheet").classList.add("hidden");
+  if ((!multiSession && appState.status === "running") || threadActionPending || appState.threadAction || attachments.busy) return;
+  if (!multiSession) { if (sendWs({ type: "newThread" })) $("sessionsSheet").classList.add("hidden"); return; }
+  $("sessionsSheet").classList.add("hidden"); $("sheet").classList.add("hidden");
+  $("newInProject").disabled = !appState.threadId || !appState.cwd || !!appState.projectless;
+  $("newProjectPath").textContent = appState.projectless ? "当前为临时会话" : appState.cwd || "未选择项目";
+  $("newSessionSheet").classList.remove("hidden");
 }
+$("newSessionClose").onclick = () => $("newSessionSheet").classList.add("hidden");
+function createSession(scope) {
+  saveSessionView();
+  if (sendWs({ type: "newThread", scope, ...(scope === "project" ? { cwd: appState.cwd } : {}), requestId: "new-" + newClientId() })) $("newSessionSheet").classList.add("hidden");
+}
+$("newInProject").onclick = () => createSession("project");
+$("newTemporary").onclick = () => createSession("temporary");
+$("restartServiceBtn").onclick = () => { $("sheet").classList.add("hidden"); $("restartSheet").classList.remove("hidden"); };
+$("restartClose").onclick = () => $("restartSheet").classList.add("hidden");
+$("restartConfirm").onclick = () => { if (sendWs({ type: "restartService", confirmed: true, requestId: "restart-" + newClientId() })) $("restartSheet").classList.add("hidden"); };
+$("cancelRestartBtn").onclick = () => sendWs({ type: "cancelRestart", requestId: "restart-cancel-" + newClientId() });
+setInterval(() => {
+  if (!multiSession || !sessionReady || document.hidden || !appState.readOnly || !appState.threadId || pendingSelection || pageRequest || Date.now() < watchAfter) return;
+  if (watchRequest) { if (Date.now() - watchRequest.at < 15000) return; watchRequest = null; watchDelay = Math.min(30000, watchDelay * 2); watchAfter = Date.now() + watchDelay; return; }
+  const requestId = "watch-" + newClientId();
+  if (sendWs({ type: "watchThread", threadId: appState.threadId, requestId })) watchRequest = { requestId, at: Date.now() };
+}, 1000);
 $("quickNewThread").onclick = $("sidebarNewThread").onclick = quickNewThread;
 function forget() {
   localStorage.removeItem(LS.profile); // keep keys so the device stays paired

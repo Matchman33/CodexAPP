@@ -24,6 +24,7 @@ if (process.argv[1]?.endsWith("app-server")) {
         case "thread/read":
         case "thread/resume": {
           const thread = threads.get(p.threadId); if (!thread) throw new Error("not found");
+          if (m.method === "thread/resume" && p.threadId === "two" && fs.existsSync("external-writer.json") && JSON.parse(fs.readFileSync("external-writer.json", "utf8")).occupied) throw new Error("thread already has an active writer");
           if (m.method === "thread/resume") loaded.add(p.threadId);
           result = { thread }; break;
         }

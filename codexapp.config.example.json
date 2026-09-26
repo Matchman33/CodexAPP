@@ -7,5 +7,6 @@
   "approvalPolicy": "on-request",
   "sandbox": "workspace-write",
   "model": null,
-  "reasoningEffort": null
+  "reasoningEffort": null,
+  "terminalEnabled": true
 }

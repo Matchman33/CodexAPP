@@ -103,6 +103,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 登记只接受会话工作目录内、明确出现在助手文件引用或生成事件中的允许类型文件。拒绝网络地址、目录穿越、指向项目外的符号链接、硬链接、隐藏目录、常见凭据及未开放类型；每次读取核验规范路径和文件身份、大小、修改时间。客户端只能请求已登记的随机附件 ID，不能指定文件系统路径。旧 ID 因文件变化、登记淘汰或后端重启失效时，应重新打开历史获取元信息。会话删除会撤销对应登记。
 
+文件引用识别会去掉 `:行号[:列号]` 与 `#L行号` 定位后缀，并规范 Windows 的 `/C:/` 前缀，但保留原始 `reference/references` 用于前端匹配；这些转换不扩大允许访问的目录。HTTP(S) 和明确的 IP 端口地址不登记为附件。不可用附件在前端使用无 `href` 的说明入口，不生成公共地址加内部占位片段。
+
 单个文件不超过 32 MiB，每块不超过 192 KiB，全局最多 4 个同时读取请求，登记表最多 512 个条目。下载通过已鉴权的原连接返回给请求方，直连不广播文件分块；云 Agent 使用既有 E2E 信封。文件请求不进入模型任务控制队列，不等待模型执行完成；不新增公开文件下载目录或接受任意磁盘路径的 HTTP 接口。网页原图预览仅允许 PNG/JPEG/WebP/GIF；文本类型通过 `textContent` 显示，HTML、SVG 和代码不执行，其他文件只提供下载。
 
 ### 会话管理
@@ -120,7 +122,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 `state.writerReleased:true` 表示当前中继已确认目标未加载；会话仍可保留在只读页面。发送或接续后重置此字段。释放前检查当前无活动任务或审批，取消订阅后重置权限同步状态，防止权限同步重新获取写入占用。队列保留且暂停；删除会话则移除对应等待条目但保留有限受理凭据，避免迟到的入队重试重复执行。
 
-主动释放通过 `thread/unsubscribe` 和 `thread/loaded/list` 确认。若 Codex 宽限期仍保留目标，只在已加载会话都确认空闲时重连本应用独占的 app-server 子进程；不结束其他进程，不删除写入锁文件。切换会话只取消旧订阅，不强制重连；刷新网页不会释放正在运行的任务。
+主动释放通过 `thread/unsubscribe` 和 `thread/loaded/list` 确认。若 Codex 宽限期仍保留目标，只在已加载会话都确认空闲时重连本应用独占的 app-server 子进程；不结束其他进程，不删除写入锁文件。多会话切换不取消后台订阅，刷新网页也不会释放正在运行的任务。
 
 ### 图片输入
 
@@ -149,12 +151,12 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `steer` | `text`, `images[]?` | 纠偏：往当前进行中的 turn 插话；支持图片 |
 | `interrupt` | `threadId?`, `turnId?` | 中断指定或当前任务；后端向 Codex 传齐两个 ID |
 | `approval` | `key`, `optionId` | 回传审批决策（`optionId` ∈ approve/approveSession/deny） |
-| `newThread` | `cwd?` | 新建会话 |
+| `newThread` | `cwd?`, `scope?`, `requestId?` | 新建会话；`scope` 为 `project` 或 `temporary`，后者使用独立目录 |
 | `setConfig` | `approvalPolicy?`, `sandbox?`, `cwd?`, `model?`, `reasoningEffort?`, `requestId?` | 保存选择；模型与等级下一条消息生效，权限在当前任务结束后同步，空闲已接续会话立即同步 |
 | `listModels` | `cwd?` | 从电脑端 Codex 获取模型列表与该目录的默认模型 |
 | `getState` | — | 请求重新下发快照 |
 | `listThreads` | — | 请求会话/项目列表，服务端回 `projectTree` |
-| `readThread` | `threadId`, `historyMode?`, `requestId?`, `checkWriter?` | 只读查看会话，不获取写入锁；网页切换默认传 `checkWriter:true`，先检测外部占用再加载历史 |
+| `readThread` | `threadId`, `historyMode?`, `requestId?` | 只读打开或切换查看目标，不检查占用、不停止其他会话；旧 `checkWriter` 标记不再生效 |
 | `historyPage` | `threadId`, `cursor?`, `requestId` | 只读获取历史页；省略游标获取最新页，回 `historyPage` |
 | `readHistoryItem` | `threadId`, `detailCursor`, `offset?`, `requestId` | 分段读取超长消息或工具输出，回 `historyItem` |
 | `resumeThread` | `threadId` | 接续已有会话（切到它的项目 cwd，继续这段对话） |
@@ -169,7 +171,38 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ### 历史分页与缓存
 
-`readThread.checkWriter:true` 在读取历史及取消原会话订阅之前探测目标锁。Windows UUID 会话的外部持有者触发 `writerConflict`，同时带 `onOpen:true` 和原 `requestId`，本次不切换当前会话。直连只向发起选择的客户端发出该提示；网页用选择 ID 丢弃迟到的检查结果并结束加载状态。非 Windows 或非 UUID 会话暂不执行文件锁探测，接续时仍保留原有冲突处理。主动选择「仅查看历史」时重发 `readThread` 并传 `checkWriter:false`，不调用 `thread/resume`。普通旧客户端省略该字段仍按只读方式打开。此检查过滤中继自身与其 app-server PID；`releaseThread` 不会因此取得结束外部进程的权限。
+打开历史不做写入占用检测；真正发送或明确接续发生 active-writer 错误时才触发 `writerConflict`。原进程确认结束后再次核实锁持有者：已经自行退出且没有新持有者时可以继续；发现新进程时必须重新确认，不自动结束新进程。无持有者但接续短暂冲突时有限重试，其他接续错误明确区分为解除后的失败。
+
+### 多会话与受控重启
+
+`hello.multiSession.supported:true` 表示支持多会话。直连在 WebSocket 查询中发送 `clientId`；云端在内层命令中发送 `clientId`。选择按客户端隔离，旧客户端未提供标识时使用 `legacy` 选择。命令可携带 `threadId` 明确目标；状态、事件、队列、审批和定向响应携带会话/客户端标识，前端不能将后台状态应用到当前页面。`sessions` 返回会话摘要列表，包含 `threadId/name/cwd/projectless/status/approvals/queued`。
+
+每个会话独立管理权限、队列、审批、历史和命令顺序，共享一个 Codex RPC 连接。历史与附件读取不进入任务控制队列。`closeThread {threadId}` 只关闭浏览标签，活动任务或等待队列仍保留；`watchThread {threadId,requestId}` 只读获取最新有界历史页，响应 `historyUpdate` 包含分页数据、`syncedAt`，已取得写入权时返回 `skipped:true`。前端轮询退避，不获取写入权；阅读旧页时不自动跳至最新位置。
+
+`state.projectless:true` 表示临时会话。`newThread.scope:"temporary"` 忽略传入的项目目录，创建应用数据目录下的独立工作目录并持久化归属；不会把空目录参数解释为沿用旧项目。`hello.historyEpoch` 用于识别缓存实例，实例改变时丢弃旧历史游标。
+
+`hello.serviceRestart` 和 `serviceRestart` 消息包含 `supported`、`phase`（`idle/waiting/restarting`）及 `error`。`restartService {confirmed:true,requestId}` 需要已有认证，等待本应用全部活动任务完成并阻止下一条队列启动；`cancelRestart` 仅在等待阶段有效。开始重启前保存未执行队列及受理凭据，恢复后为暂停状态，不自动重发。启动器通过固定 IPC 消息重新启动固定入口，不接受客户端传入命令或路径；未受管的启动方式声明不支持。
+
+### 交互终端协议
+
+`hello.terminal` 声明 `supported/error/shell` 和容量限制。所有命令沿用原认证通道及 `clientId`，终端命令不进入 AI 控制队列，不因 Codex 未连接而禁止执行。终端运行权限为操作系统账户权限，与 `approvalPolicy/sandbox` 分开。
+
+| 命令 | 参数 | 行为 |
+|---|---|---|
+| `terminalOpen` | `threadId?`, `cols?`, `rows?`, `requestId` | 从该会话或默认目录启动固定 shell；忽略客户端传入的 cwd |
+| `terminalList` | `requestId?` | 返回终端摘要和活动数量 |
+| `terminalAttach` | `terminalId`, `takeControl?`, `requestId` | 恢复屏幕，`takeControl:true` 明确接管输入 |
+| `terminalInput` | `terminalId`, `lease`, `inputSeq`, `data`, `requestId?` | 写入原始按键；序号连续，重复序号不再次写入 |
+| `terminalResize` | `terminalId`, `lease`, `cols`, `rows` | 控制页面调整尺寸，列 10～240、行 2～80 |
+| `terminalAck` | `terminalId`, `seq` | 浏览器完成解析后确认输出，回收传输窗口 |
+| `terminalDetach` | `terminalId?` | 解除本页查看与控制，进程继续 |
+| `terminalClose` | `terminalId`, `lease`, `confirmed:true`, `requestId` | 明确结束终端并回收资源 |
+
+`terminalAttached` 返回 `terminalId/threadId/cwd/shell/status/exitCode/cols/rows/seq/data/canInput/lease`，`data` 为当前屏幕的 ANSI 序列，控制租约只给控制页面。后续 `terminalOutput {terminalId,seq,data}` 按序号递增，前端解析后发送确认；`terminalControl`、`terminalResized`、`terminalExit`、`terminalClosed` 更新状态。屏幕和输出不能作为 HTML 执行。
+
+每个慢页面最多保留 131072 个未确认输出字符，达到限制时发出 `terminalPaused` 并停止向该页推送；重连后从当前屏幕恢复。服务端模拟屏幕保留最多 500 行，PTY 独立子进程也有传输背压。输入单包最多 16384 字符，禁止自动重放输入；重连与接管生成新租约，旧页面的输入与缩放请求会被拒绝。
+
+打开或正在启动的终端阻止 `restartService`；等待项目重启时禁止创建终端。终端不恢复到新的服务进程。API 只结束本应用创建的 PTY，不按系统进程名称批量结束程序。
 
 普通消息的实时回显可附带 `inputEcho:true`。任务受理后使用同一 `event.id` 补齐实际 `turnId`，不是再次提交提示词。网页发现同一会话、同一轮次且文本一致的持久化用户条目时移除对应临时回显；不同轮次的相同文本仍保留为独立消息。
 
@@ -247,9 +280,9 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 队列变化广播 type:"promptQueue"、queue；入队受理回传 type:"promptAccepted"、id、requestId、threadId、queue。后端先登记受理凭据再调度执行；受理不代表任务成功。错误沿用 type:"error" 并回传原 requestId。客户端应匹配自己的请求 ID 后清空对应草稿，不能把其他客户端的确认当成自己的发送确认。
 
-请求 ID 须为 1～160 个 ASCII 字母、数字或下划线、点、冒号、连字符。同 ID、同会话、同文本、同 cwd 和同图片内容的重试返回原凭据；变更内容（含原图、名称或缩略图）则报错。保留最近 200 个凭据并保护等待及执行中的请求，已取消消息的重试也不会恢复入队。该窗口是有限的，不支持跨后端重启的幂等；网页不会自动重发未确认消息。
+请求 ID 须为 1～160 个 ASCII 字母、数字或下划线、点、冒号、连字符。同 ID、同会话、同文本、同 cwd 和同图片内容的重试返回原凭据；变更内容（含原图、名称或缩略图）则报错。每个会话保留最近 200 个凭据并保护等待及执行中的请求，已取消消息的重试也不会恢复入队。受控重启恢复这些凭据，普通崩溃不保证跨重启幂等；网页不会自动重发未确认消息。
 
-队列仅存电脑端后端内存，关闭网页后继续保留，服务重启清空。全会话合计上限为 20 条、262144 字符，单条上限为 65536 字符，字符按 JavaScript UTF-16 长度计。等待消息按原会话 FIFO 执行，仅 turn.status 为 completed 才自动推进；中断、失败、未知状态、写入占用或 Codex 断连均暂停队列。切换会话会暂停原会话队列，只能在重新打开原会话后手动继续。消息开始执行时使用当时的模型、思考等级和审批策略。
+队列平时保存在电脑端内存，关闭网页后继续保留；受控重启额外写入一次性恢复文件并暂停恢复，普通崩溃不保证恢复。全会话合计上限为 20 条、262144 字符，单条最多 65536 字符（UTF-16 长度）。同一会话 FIFO，仅成功完成才自动推进；中断、失败、未知状态、占用或 Codex 断连均暂停相应队列。多会话切换不暂停后台队列，不同会话可并行，开始执行时采用该会话当前设置。
 
 普通 prompt 保留给旧客户端，但运行中拒绝启动第二个任务。steer 不进入队列。入队时不生成用户气泡；开始执行才生成带稳定 id 和 inputEcho:true 的临时回显，并在取得任务 ID 后补齐 turnId。队列调度与任务控制共用串行命令链，历史分页仍独立处理。
 

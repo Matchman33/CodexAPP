@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 if (/[\\/]relay[\\/]server\.mjs$/.test(process.argv[1] || "")) {
   const { WriterControl } = await import(pathToFileURL(path.join(process.cwd(), "core/writerControl.mjs")).href);
   await fs.writeFile("external-writer.json", JSON.stringify({ occupied: true }));
+  await fs.writeFile("checks.jsonl", "");
   const record = entry => fs.appendFile("checks.jsonl", JSON.stringify(entry) + "\n");
   const conflict = threadId => ({ type: "writerConflict", threadId, message: "此会话被外部 Codex 进程占用", owners: [{ pid: 4242, name: "codex", affectedThreads: [threadId, "child"], canTerminate: true, token: "fixture-confirm" }] });
   WriterControl.prototype.inspectExternal = async function (threadId) {

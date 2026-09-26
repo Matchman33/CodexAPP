@@ -3,6 +3,7 @@
 import { build } from "esbuild";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { copyTerminalRuntime } from "../scripts/copy-terminal-runtime.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -19,3 +20,4 @@ await build({
   logLevel: "warning",
 });
 console.log("[desktop] bundled agent.cjs");
+copyTerminalRuntime(HERE);

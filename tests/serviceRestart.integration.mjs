@@ -1,0 +1,57 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import net from "node:net";
+import { fork } from "node:child_process";
+import { once } from "node:events";
+import { pathToFileURL } from "node:url";
+import WebSocket from "ws";
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexapp-restart-"));
+let launcher, socket, log = "";
+try {
+  for (const name of ["core", "relay", "scripts"]) await fs.cp(name, path.join(root, name), { recursive: true });
+  await fs.symlink(path.resolve("node_modules"), path.join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+  await fs.copyFile("tests/fixtures/restartCodex.mjs", path.join(root, "fake.mjs"));
+  const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));
+  const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
+  await fs.writeFile(path.join(root, "codexapp.config.json"), JSON.stringify({ codexBin: process.execPath, host: "127.0.0.1", port, token: "fixture", model: "fixture", defaultCwd: root, preventSleep: false }));
+  launcher = fork(path.join(root, "scripts/run.mjs"), ["relay"], { cwd: root, env: { ...process.env, NODE_OPTIONS: "--import=" + pathToFileURL(path.join(root, "fake.mjs")).href, CODEX_HOME: path.join(root, "home"), CODEXAPP_DATA_DIR: path.join(root, "data"), CODEXAPP_PREVENT_SLEEP: "0" }, stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true });
+  launcher.stdout.on("data", d => { log += d; }); launcher.stderr.on("data", d => { log += d; });
+  const until = async fn => { for (let i = 0; i < 160; i++) { if (await fn()) return; if (launcher.exitCode !== null) throw new Error(log); await new Promise(r => setTimeout(r, 50)); } throw new Error("timeout: " + log); };
+  const calls = async () => { try { return (await fs.readFile(path.join(root, "calls.jsonl"), "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse); } catch { return []; } };
+  const healthy = async () => { try { return (await (await fetch("http://127.0.0.1:" + port + "/health")).json()).codexConnected; } catch { return false; } };
+  await until(healthy);
+  let messages = [];
+  const connect = async () => { socket = new WebSocket("ws://127.0.0.1:" + port + "/ws?token=fixture&clientId=test"); socket.on("message", d => messages.push(JSON.parse(d))); await once(socket, "open"); await until(() => messages.some(m => m.type === "hello")); };
+  await connect(); assert.equal(messages.find(m => m.type === "hello").serviceRestart.supported, true);
+  const send = m => socket.send(JSON.stringify(m));
+  send({ type: "prompt", text: "active" });
+  await until(() => messages.some(m => m.type === "state" && m.state.status === "running"));
+  send({ type: "enqueuePrompt", threadId: "one", text: "waiting", requestId: "queue-one" });
+  await until(() => messages.some(m => m.type === "promptAccepted"));
+  send({ type: "restartService", confirmed: true, requestId: "restart-one" });
+  await until(() => messages.some(m => m.type === "serviceRestart" && m.phase === "waiting"));
+  assert.equal((await calls()).filter(c => c.method === "initialize").length, 1);
+  const disconnected = once(socket, "close");
+  await fs.writeFile(path.join(root, "finish-turn"), "done");
+  await disconnected;
+  await until(async () => (await calls()).filter(c => c.method === "initialize").length === 2 && await healthy());
+  messages = []; await connect();
+  send({ type: "getState", threadId: "one", requestId: "restore" });
+  await until(() => messages.some(m => m.requestId === "restore"));
+  const restored = messages.find(m => m.requestId === "restore");
+  assert.equal(restored.promptQueue.paused, true); assert.equal(restored.promptQueue.items[0].text, "waiting");
+  assert.equal((await calls()).filter(c => c.method === "turn/start").length, 1);
+  const inits = (await calls()).filter(c => c.method === "initialize"); assert.notEqual(inits[0].pid, inits[1].pid);
+  send({ type: "resumeQueue", threadId: "one" });
+  await until(async () => (await calls()).filter(c => c.method === "turn/start").length === 2);
+  assert.equal((await calls()).filter(c => c.method === "turn/start")[1].params.input[0].text, "waiting");
+  console.log("PASS: real isolated supervisor restart, same port, changed child PID, paused queue recovery and manual resume; model prompts: 0");
+} finally {
+  socket?.terminate();
+  if (launcher?.exitCode === null) { const exit = once(launcher, "exit"); launcher.send({ type: "codexapp-stop" }); await exit; }
+  try { await fs.unlink(path.join(root, "node_modules")); } catch (e) { if (e.code !== "ENOENT") throw e; }
+  if (path.dirname(root) !== path.resolve(os.tmpdir()) || !path.basename(root).startsWith("codexapp-restart-")) throw new Error("Invalid cleanup path");
+  await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}

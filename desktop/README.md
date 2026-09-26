@@ -23,3 +23,7 @@ npm run dist       # 产出 dist/CodexApp-Setup-<version>.exe (NSIS 安装包)
 - 配置/密钥存在用户目录(`app.getPath("userData")`),不在安装目录。
 - 云端 Broker 使用现有 Agent 配置；它与根目录本地中继是不同路线，具体配置见 [云端说明](../cloud/README.md)。
 - 未签名:Windows SmartScreen 首次会提示,正式发布请用代码签名证书。
+
+## 交互终端运行文件
+
+新增终端使用 `node-pty` 原生运行文件和独立的 `terminalPtyWorker.cjs`。`node build.mjs` 会准备并复制这些文件；分发包需要连同 `node_modules/node-pty`、相关依赖和 worker 一起保留，不能只复制 `agent.cjs`。Windows 的 ConPTY DLL 按构建电脑架构准备，跨平台或跨架构分发需在目标平台构建验证。源码 Node 模式已验证，Electron 安装包需重新构建后实机验收终端。

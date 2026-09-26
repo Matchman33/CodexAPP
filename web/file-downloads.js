@@ -44,7 +44,8 @@ window.FileDownloads = class FileDownloads {
       const marker = /^#codex-(file|preview)-(\d+)$/.exec(reference || "");
       const file = marker ? files[Number(marker[2])] : files.find(file => file.reference === reference || file.references?.includes(reference));
       if (file) { link.removeAttribute("target"); link.onclick = e => { e.preventDefault(); this.start(file, marker?.[1] === "preview"); }; }
-      else if (reference === "#codex-file-unavailable" || marker || (reference && !reference.startsWith("#") && (!/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(reference) || /^(?:file:|sandbox:|[a-z]:[\\/])/i.test(reference)))) {
+      else if (link.dataset.codexUnavailable === "true" || reference === "#codex-file-unavailable" || marker || window.ChatUI.localFileTarget(reference) !== null) {
+        link.removeAttribute("href"); link.setAttribute("role", "button"); link.setAttribute("tabindex", "0");
         link.removeAttribute("target");
         link.onclick = e => {
           e.preventDefault();
@@ -52,6 +53,7 @@ window.FileDownloads = class FileDownloads {
           if (!feedback) { feedback = document.createElement("p"); feedback.className = "file-message"; feedback.setAttribute("role", "alert"); row.append(feedback); }
           feedback.textContent = this.supported ? "该文件未开放下载、超过大小限制或已不存在" : "当前中继尚未启用文件下载，请重启中继后刷新页面";
         };
+        link.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); link.click(); } };
       }
     }
   }

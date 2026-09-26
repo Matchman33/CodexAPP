@@ -10,9 +10,10 @@ const OWNER = { pid: 1234, name: "codex", started: "134336519147918381", canTerm
 
 function fixture(overrides = {}) {
   const calls = [];
+  let terminated = false;
   const control = new WriterControl({
     home: path.resolve("test-home"), platform: "win32", protectedPids: () => [9999],
-    runner: async (args) => { calls.push(args); return args.action === "inspect" ? { owners: [{ ...OWNER }] } : { terminated: true }; },
+    runner: async (args) => { calls.push(args); if (args.action === "inspect") return { owners: terminated ? [] : [{ ...OWNER }] }; terminated = true; return { terminated: true }; },
     ...overrides,
   });
   return { control, calls };
@@ -191,18 +192,18 @@ test("外部检查保留探测失败状态，不谎报无人占用；不支持�
   assert.equal(unsupported.calls.length, 0);
 });
 
-test("打开被占用会话时先返回绑定选择请求的冲突，不加载历史、不释放旧会话、不接续", async () => {
+test("打开被占用会话仍直接读取历史，旧客户端的检查标记不再触发占用弹窗", async () => {
   const { bridge, messages, calls } = bridgeFixture();
-  bridge.state.readOnly = false;
+  bridge.state.readOnly = true;
   bridge.eventLog = [{ id: "old", kind: "user", text: "保留旧历史" }];
   const { control, calls: inspections } = fixture();
   bridge.writers = control;
-  await bridge.dispatch({ type: "readThread", threadId: ID, historyMode: "paged", requestId: "selection-1", checkWriter: true });
-  assert.equal(calls.length, 0);
-  assert.equal(inspections.length, 1); assert.equal(inspections[0].action, "inspect");
-  assert.equal(bridge.state.threadId, OTHER); assert.equal(bridge.state.readOnly, false);
-  assert.equal(bridge.eventLog[0].text, "保留旧历史");
-  assert.deepEqual([messages.at(-1).type, messages.at(-1).onOpen, messages.at(-1).requestId], ["writerConflict", true, "selection-1"]);
+  bridge.codex.request = async (method, params) => { calls.push({ method, params }); return { thread: { id: ID, turns: [] } }; };
+  await bridge.dispatch({ type: "readThread", threadId: ID, requestId: "selection-1", checkWriter: true });
+  assert.deepEqual(calls.map(c => c.method), ["thread/read"]);
+  assert.equal(inspections.length, 0);
+  assert.equal(bridge.state.threadId, ID); assert.equal(bridge.state.readOnly, true);
+  assert.deepEqual([messages.at(-1).type, messages.at(-1).requestId], ["hello", "selection-1"]);
 });
 
 test("空闲会话正常打开，仅查看历史可明确跳过外部检查，两者都不抢占会话", async () => {
@@ -212,7 +213,7 @@ test("空闲会话正常打开，仅查看历史可明确跳过外部检查，�
     bridge.writers.inspectExternal = async () => { inspections++; return null; };
     bridge.codex.request = async (method, params) => { calls.push({ method, params }); return { thread: { id: ID, turns: [] } }; };
     await bridge.dispatch({ type: "readThread", threadId: ID, requestId: "selection", checkWriter });
-    assert.equal(inspections, checkWriter ? 1 : 0);
+    assert.equal(inspections, 0);
     assert.equal(bridge.state.threadId, ID); assert.equal(bridge.state.readOnly, true);
     assert.deepEqual(calls.map(c => c.method), ["thread/read"]);
     assert.equal(messages.at(-1).type, "hello"); assert.equal(messages.at(-1).requestId, "selection");

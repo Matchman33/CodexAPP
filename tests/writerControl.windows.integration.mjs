@@ -56,10 +56,12 @@ try {
   assert(onOpen.owners.some(owner => owner.pid === child.pid), "Opening must detect the isolated external writer before a prompt");
   const selfControl = new WriterControl({ home, protectedPids: () => [process.pid, child.pid] });
   assert.equal(await selfControl.inspectExternal(threadId), null, "The owned app-server must not trigger an external-writer popup");
+  const laterConfirmation = (await control.inspect(threadId)).owners[0].token;
   await control.terminate(threadId, owner.token, true);
   await exited;
   assert.deepEqual((await control.inspect(threadId)).owners, []);
   assert.equal(await control.inspectExternal(threadId), null);
+  await control.terminate(threadId, laterConfirmation, true);
   console.log("PASS: isolated writer identified, confirmed, terminated, and its lock released; no model prompt sent");
 } finally {
   for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error("test complete")); }

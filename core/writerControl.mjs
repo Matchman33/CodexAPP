@@ -29,7 +29,8 @@ async function windowsRunner({ lockFile, action, pid = 0, started = "", affected
     });
     return JSON.parse(stdout.replace(/^\uFEFF/, "").trim());
   } catch (error) {
-    throw new Error("无法检查或结束占用进程（可能权限不足或占用已变化），请重试检查；也可在电脑端关闭对应会话。", { cause: error });
+    const detail = String(error.stderr || error.message || "").replace(/\s+/g, " ").slice(0, 400);
+    throw new Error("无法检查或结束占用进程，请重新检查。" + detail, { cause: error });
   }
 }
 
@@ -86,6 +87,12 @@ export class WriterControl {
     if (this.protectedPids().includes(choice.pid)) throw new Error("不能结束当前中继自己的控制进程，请使用停止任务。");
     const result = await this.runner({ lockFile: this.lockFile(threadId), action: "terminate", ...choice });
     if (!result.terminated) throw new Error("占用进程未确认退出，尚未接管会话。");
-    return choice.pid;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const current = await this.runner({ lockFile: this.lockFile(threadId), action: "inspect" });
+      if (!current.owners?.length) return choice.pid;
+      if (current.owners.some(owner => owner.pid !== choice.pid || owner.started !== choice.started)) throw new Error("原占用已解除，但有新的进程占用；请重新检查并确认，未结束新进程。");
+      await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+    throw new Error("结束操作已返回，但原会话占用尚未释放，请稍后重新检查。");
   }
 }

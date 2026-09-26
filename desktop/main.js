@@ -48,6 +48,7 @@ else {
   app.whenReady().then(() => {
     process.env.CODEXAPP_NO_OPEN = "1";                 // don't spawn an external browser window
     process.env.CODEXAPP_DIR = app.getPath("userData"); // config + panel.url live here
+    globalThis.codexappRestart = () => { app.relaunch(); app.exit(0); };
     require(path.join(__dirname, "agent.cjs"));          // start the embedded agent
     createWindow();
     app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

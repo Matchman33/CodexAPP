@@ -99,3 +99,7 @@ node cloud/testPhone.mjs you@example.com yourpassword "只用一个词回复我�
 8. **可观测**：日志、监控、连接数扩展（每用户 2 条常连）。
 
 把 v1 内核（本目录）跑通后，上面这些是工程化与产品化，不再有"能不能实现"的不确定性。
+
+## 交互终端分发说明
+
+Node、SEA 和 Electron 的终端需要平台对应的 `node-pty` 原生模块及 `terminalPtyWorker.cjs`。构建脚本会把运行文件复制到产物旁；启用终端的 SEA 产物不再是仅复制单个可执行文件即可使用，必须同时分发生成的 `node_modules` 与 worker。模块缺失时只禁用终端，原云端聊天功能保留。终端沿用已配对的 E2E 通道，不新增公开执行接口。

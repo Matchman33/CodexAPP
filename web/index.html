@@ -112,6 +112,8 @@
       <span id="threadTitle">新对话</span><span id="cwdLabel" class="muted small mono"></span>
     </div>
 
+    <nav id="sessionTabs" class="session-tabs hidden" aria-label="已打开会话"></nav>
+    <p id="watchStatus" class="watch-status hidden" role="status"></p>
     <div class="conversation">
       <div id="historyToolbar" class="history-toolbar hidden">
         <button id="historyOlder" class="icon-btn hidden" title="更早的消息" aria-label="更早的消息"><i data-lucide="chevron-up"></i></button>
@@ -128,6 +130,7 @@
     <button id="diffBar" class="diff-bar hidden"><i data-lucide="file-diff"></i>查看本次改动</button>
 
     <footer class="composer">
+      <p id="serviceStatus" class="small muted hidden" role="status"></p>
       <p id="permissionStatus" class="permission-status hidden" role="status"></p>
       <section id="queuePanel" class="queue-panel hidden" aria-label="待执行消息">
         <div class="queue-header">
@@ -149,6 +152,7 @@
         <textarea id="input" rows="1" placeholder="发送消息" aria-label="消息"></textarea>
         <div class="composer-tools">
           <button id="attachImageBtn" class="icon-btn" title="添加图片" aria-label="添加图片"><i data-lucide="image-plus"></i></button>
+          <button id="terminalBtn" class="icon-btn" title="打开终端" aria-label="打开终端" disabled><i data-lucide="square-terminal"></i></button>
           <button id="effortBtn" class="effort-trigger" title="选择思考等级"><i data-lucide="sliders-horizontal"></i><span id="effortLabel">默认思考</span></button>
           <label class="steer-toggle" title="向正在运行的任务补充指令"><input type="checkbox" id="steerMode" role="switch" />纠偏</label>
           <button id="sendBtn" class="icon-btn send-btn" aria-label="发送消息" title="发送消息"><i data-lucide="arrow-up"></i></button>
@@ -200,6 +204,8 @@
       </div>
       <p id="cfgError" class="small settings-error hidden" role="alert"></p>
       <button id="releaseThreadBtn" class="btn secondary full" disabled><i data-lucide="lock-open"></i>解除当前会话占用</button>
+      <button id="restartServiceBtn" class="btn secondary full" disabled><i data-lucide="refresh-cw"></i>重启本项目</button>
+      <button id="cancelRestartBtn" class="btn secondary full hidden"><i data-lucide="x"></i>取消计划重启</button>
       <p id="threadActionStatus" class="small muted" role="status"></p>
       <button id="enableNotif" class="btn secondary full">开启审批通知</button>
       <p id="memberStatus" class="muted small"></p>
@@ -271,6 +277,61 @@
     <div class="text-preview-controls"><span id="textPreviewNote" role="status"></span><label class="text-preview-wrap"><input id="textPreviewWrap" type="checkbox" />自动换行</label><select id="textPreviewEncoding" aria-label="文本编码"><option value="auto">自动识别编码</option><option value="utf-8">UTF-8</option><option value="gb18030">GB18030 / GBK</option><option value="utf-16le">UTF-16 LE</option><option value="utf-16be">UTF-16 BE</option></select></div>
     <pre id="textPreviewContent" tabindex="0" aria-label="文本内容"></pre>
   </dialog>
+  <div id="newSessionSheet" class="sheet hidden">
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="newSessionTitle">
+      <div class="sheet-header"><h2 id="newSessionTitle">新建会话</h2><button id="newSessionClose" class="icon-btn" aria-label="关闭"><i data-lucide="x"></i></button></div>
+      <button id="newInProject" class="btn secondary full"><i data-lucide="folder"></i>在当前项目新建</button>
+      <p id="newProjectPath" class="small muted session-path"></p>
+      <button id="newTemporary" class="btn secondary full"><i data-lucide="message-square"></i>临时会话（无项目）</button>
+    </div>
+  </div>
+  <div id="restartSheet" class="sheet hidden">
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="restartTitle">
+      <div class="sheet-header"><h2 id="restartTitle">重启本项目</h2><button id="restartClose" class="icon-btn" aria-label="取消"><i data-lucide="x"></i></button></div>
+      <p>等待本应用的当前任务结束后重启。未执行消息将保留并暂停，连接恢复后可继续队列。</p>
+      <button id="restartConfirm" class="btn full"><i data-lucide="refresh-cw"></i>确认重启</button>
+    </div>
+  </div>
+  <section id="terminalPanel" class="terminal-panel hidden" role="dialog" aria-modal="true" aria-labelledby="terminalTitle">
+    <header class="terminal-header">
+      <strong id="terminalTitle">终端</strong>
+      <select id="terminalSelect" aria-label="选择终端"><option value="">未打开终端</option></select>
+      <button id="terminalNew" class="icon-btn" title="新建终端" aria-label="新建终端"><i data-lucide="plus"></i></button>
+      <button id="terminalReconnect" class="icon-btn" title="重新连接终端" aria-label="重新连接终端"><i data-lucide="refresh-cw"></i></button>
+      <button id="terminalTakeover" class="icon-btn hidden" title="接管终端输入" aria-label="接管终端输入"><i data-lucide="keyboard"></i></button>
+      <button id="terminalEnd" class="icon-btn" title="结束终端" aria-label="结束终端"><i data-lucide="trash-2"></i></button>
+      <button id="terminalHide" class="icon-btn" title="收起终端" aria-label="收起终端"><i data-lucide="x"></i></button>
+    </header>
+    <div class="terminal-info"><span id="terminalStatus" role="status">未连接</span><select id="terminalWidth" class="terminal-width" aria-label="终端宽度" title="终端宽度"><option value="0">自适应</option><option value="80">80 列</option><option value="120">120 列</option><option value="160">160 列</option><option value="240">240 列</option></select><span>系统账户权限</span></div>
+    <div id="terminalCwd" class="terminal-cwd mono" title="启动目录"></div>
+    <div class="terminal-navigation">
+      <button id="terminalPan" class="icon-btn" aria-label="拖动查看终端" title="拖动查看终端" aria-pressed="false"><i data-lucide="hand"></i></button>
+      <button id="terminalZoomOut" class="icon-btn" aria-label="缩小终端文字" title="缩小终端文字"><i data-lucide="zoom-out"></i></button>
+      <output id="terminalZoomValue" class="terminal-zoom-value" aria-label="终端缩放比例">100%</output>
+      <button id="terminalZoomIn" class="icon-btn" aria-label="放大终端文字" title="放大终端文字"><i data-lucide="zoom-in"></i></button>
+      <button id="terminalZoomReset" class="icon-btn" aria-label="恢复默认缩放" title="恢复默认缩放"><i data-lucide="rotate-ccw"></i></button>
+      <span id="terminalScrollPosition" class="terminal-scroll-position"></span>
+      <button id="terminalLatest" class="icon-btn" aria-label="回到最新输出" title="回到最新输出"><i data-lucide="arrow-down-to-line"></i></button>
+    </div>
+    <div id="terminalViewport" class="terminal-viewport"><div id="terminalSurface" class="terminal-surface"></div></div>
+    <div id="terminalHorizontalBar" class="terminal-horizontal-bar hidden"><input id="terminalHorizontalScroll" type="range" min="0" max="0" step="1" value="0" role="scrollbar" aria-label="终端横向滚动" aria-orientation="horizontal" aria-controls="terminalViewport" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" /></div>
+    <div class="terminal-keys">
+      <button data-terminal-key="escape" class="terminal-key" title="Escape">Esc</button>
+      <button data-terminal-key="tab" class="terminal-key" title="Tab">Tab</button>
+      <button data-terminal-key="interrupt" class="terminal-key" title="中断前台程序">Ctrl+C</button>
+      <button data-terminal-key="up" class="icon-btn" aria-label="向上" title="向上"><i data-lucide="arrow-up"></i></button>
+      <button data-terminal-key="down" class="icon-btn" aria-label="向下" title="向下"><i data-lucide="arrow-down"></i></button>
+      <button data-terminal-key="left" class="icon-btn" aria-label="向左" title="向左"><i data-lucide="arrow-left"></i></button>
+      <button data-terminal-key="right" class="icon-btn" aria-label="向右" title="向右"><i data-lucide="arrow-right"></i></button>
+      <button id="terminalClear" class="icon-btn" aria-label="清屏" title="清屏"><i data-lucide="eraser"></i></button>
+      <button id="terminalPaste" class="icon-btn" aria-label="粘贴到终端" title="粘贴到终端"><i data-lucide="clipboard-paste"></i></button>
+    </div>
+  </section>
+  <dialog id="terminalCloseDialog" class="terminal-dialog"><h2>结束终端</h2><p>将关闭此终端及其中的前台程序，无法恢复原进程。</p><div class="actions"><button id="terminalCloseCancel" class="btn secondary">取消</button><button id="terminalCloseConfirm" class="btn danger">结束终端</button></div></dialog>
+  <dialog id="terminalPasteDialog" class="terminal-dialog"><h2>粘贴到终端</h2><textarea id="terminalPasteText" rows="5" aria-label="粘贴内容" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea><div class="actions"><button id="terminalPasteCancel" class="btn secondary">取消</button><button id="terminalPasteConfirm" class="btn">粘贴</button></div></dialog>
+  <link rel="stylesheet" href="vendor/terminal.css" />
+  <script src="vendor/terminal.js"></script>
+  <script src="terminal.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
