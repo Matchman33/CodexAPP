@@ -35,6 +35,7 @@ web-build/
 web/vendor/chat-ui.js
 web/vendor/terminal.js
 web/vendor/terminal.css
+web/vendor/preview-highlight-worker.js
 desktop/terminalPtyWorker.cjs
 
 # frp 本地配置、部署密钥、客户端包与证书

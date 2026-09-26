@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FileAttachments, fileReferences } from "../core/fileAttachments.mjs";
-import { localFileTarget, webLinkTarget } from "../core/linkTargets.mjs";
+import { localFileTarget, webLinkTarget, fileLinkLocation, textLocation } from "../core/linkTargets.mjs";
 
 test("带行号的源码链接能登记为原文件，不把行号当作文件名", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codexapp-links-"));
@@ -17,6 +17,27 @@ test("带行号的源码链接能登记为原文件，不把行号当作文件�
   }
   assert.equal(files.register("../outside.js:12", "one"), null);
   assert.equal(files.register("demo.js:secret", "one"), null);
+});
+
+test("文件定位保留行列与范围，不把网页端口当行号", () => {
+  assert.deepEqual(fileLinkLocation("demo.js:120"), { line: 120 });
+  assert.deepEqual(fileLinkLocation("demo.js:120:3"), { line: 120, column: 3 });
+  assert.deepEqual(fileLinkLocation("demo.js#L120-L125"), { line: 120, endLine: 125 });
+  assert.deepEqual(fileLinkLocation("/C:/demo.js#L12C4-L15C8"), { line: 12, column: 4, endLine: 15, endColumn: 8 });
+  for (const value of ["http://127.0.0.1:4123", "demo.js:0", "demo.js:999999999999999999999999", "demo.js"]) assert.equal(fileLinkLocation(value), null);
+});
+
+test("文本行定位兼容 CRLF、空行、末行和不存在的行，不改变原文", () => {
+  const text = "first\r\n\r\nthird\nlast";
+  const range = textLocation(text, { line: 3, column: 2, endLine: 4 });
+  assert.equal(text.slice(range.start, range.end), "third\nlast");
+  assert.equal(text.slice(range.anchor, range.anchorEnd), "h");
+  assert.equal(textLocation(text, { line: 2 }).start, textLocation(text, { line: 2 }).end);
+  assert.equal(textLocation(text, { line: 50 }).found, false);
+  assert.equal(textLocation(text, { line: 50 }).totalLines, 4);
+  assert.equal(textLocation("", { line: 1 }).found, true);
+  const unicode = textLocation("a😀b", { line: 1, column: 3 });
+  assert.equal("a😀b".slice(unicode.anchor, unicode.anchorEnd), "😀");
 });
 
 test("网页地址与文件地址分类一致，不把 IP 端口或协议地址登记成附件", () => {

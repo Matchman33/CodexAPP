@@ -54,6 +54,7 @@ try {
   assert.equal(extra[1], null); assert.equal(extra[2], null);
   await page.getByRole("link", { name: "有行号的源码", exact: true }).click();
   assert.equal((await page.evaluate(() => window.linkDownloadCalls))[0].id, "registered");
+  assert.equal((await page.evaluate(() => window.linkDownloadCalls))[0].preview, true, "点击文件超链接必须预览而不是下载");
   await page.getByRole("button", { name: "旧占位链接", exact: true }).focus(); await page.keyboard.press("Enter");
   assert.equal(page.url(), origin + "/");
   console.log("PASS: IP and port web links, unavailable file feedback, no placeholder navigation; network requests mocked locally");

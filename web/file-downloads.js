@@ -4,11 +4,14 @@ window.FileDownloads = class FileDownloads {
   constructor(send) {
     this.send = send; this.active = null; this.supported = false; this.maxBytes = 32 * 1048576; this.chunkBytes = 192 * 1024;
     this.textLimit = 1048576; this.previewUrl = null; this.cached = null; this.textPreview = null; this.messages = new Map();
+    this.highlighter = new window.ChatUI.PreviewHighlighter();
+    for (const language of window.ChatUI.previewLanguages) $("textPreviewLanguage").add(new Option(language.label, language.id));
+    $("textPreviewLanguage").onchange = () => this.renderText();
     $("textPreviewClose").onclick = () => $("textPreviewDialog").close();
     $("textPreviewEncoding").onchange = () => this.renderText();
-    $("textPreviewWrap").onchange = () => { $("textPreviewContent").classList.toggle("wrap-lines", $("textPreviewWrap").checked); $("textPreviewContent").scrollLeft = 0; };
+    $("textPreviewWrap").onchange = () => { $("textPreviewContent").classList.toggle("wrap-lines", $("textPreviewWrap").checked); $("textPreviewContent").scrollLeft = 0; this.locatePreview(); };
     $("textPreviewDownload").onclick = () => { const preview = this.textPreview; if (preview) { $("textPreviewDialog").close(); this.start(preview.file, false); } };
-    $("textPreviewDialog").addEventListener("close", () => { this.textPreview = null; $("textPreviewContent").textContent = ""; });
+    $("textPreviewDialog").addEventListener("close", () => { this.highlighter.cancel(); this.textPreview = null; $("textPreviewContent").textContent = ""; });
   }
   configure(capability) { this.supported = !!capability?.supported; }
   static previewKind(file) {
@@ -43,7 +46,16 @@ window.FileDownloads = class FileDownloads {
       const reference = link.getAttribute("href");
       const marker = /^#codex-(file|preview)-(\d+)$/.exec(reference || "");
       const file = marker ? files[Number(marker[2])] : files.find(file => file.reference === reference || file.references?.includes(reference));
-      if (file) { link.removeAttribute("target"); link.onclick = e => { e.preventDefault(); this.start(file, marker?.[1] === "preview"); }; }
+      if (file) {
+        const location = {};
+        for (const key of ["line", "column", "endLine", "endColumn"]) {
+          const value = Number(link.dataset["source" + key[0].toUpperCase() + key.slice(1)]);
+          if (Number.isSafeInteger(value) && value > 0) location[key] = value;
+        }
+        const suffix = link.nextSibling?.nodeType === Node.TEXT_NODE ? link.nextSibling.textContent.match(/^:\d+(?::\d+)?(?:-\d+(?::\d+)?)?(?=$|\s|[，。,.);])/u)?.[0] : null;
+        const target = location.line ? location : window.ChatUI.fileLinkLocation(reference) || (suffix ? window.ChatUI.fileLinkLocation(file.name + suffix) : null);
+        link.removeAttribute("target"); link.onclick = e => { e.preventDefault(); this.start(file, true, target); };
+      }
       else if (link.dataset.codexUnavailable === "true" || reference === "#codex-file-unavailable" || marker || window.ChatUI.localFileTarget(reference) !== null) {
         link.removeAttribute("href"); link.setAttribute("role", "button"); link.setAttribute("tabindex", "0");
         link.removeAttribute("target");
@@ -75,12 +87,13 @@ window.FileDownloads = class FileDownloads {
       else button.disabled = busy;
     }
   }
-  start(file, preview) {
+  start(file, preview, location = null) {
     if (this.active) { this.feedback(file, "已有文件正在接收，请等待或取消"); return; }
     if (!this.supported || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > this.maxBytes) return;
+    if (preview && !FileDownloads.previewKind(file)) { this.showTextPreview({ file, unsupported: true }); return; }
     if (!preview && this.cached?.file.id === file.id) { this.download(this.cached); this.feedback(file); return; }
     this.clearCached();
-    this.active = { file, preview: preview ? FileDownloads.previewKind(file) : null, chunks: [], offset: 0, requestId: null, timer: null };
+    this.active = { file, preview: preview ? FileDownloads.previewKind(file) : null, location: preview ? location : null, chunks: [], offset: 0, requestId: null, timer: null };
     this.next();
   }
   next() {
@@ -106,11 +119,7 @@ window.FileDownloads = class FileDownloads {
       if (task.preview === "text") {
         const bytes = new Uint8Array(Math.min(task.offset, this.textLimit)); let offset = 0;
         for (const chunk of task.chunks) { const part = chunk.subarray(0, bytes.length - offset); bytes.set(part, offset); offset += part.length; if (offset >= bytes.length) break; }
-        this.textPreview = { file: task.file, bytes, truncated: bytes.length < task.file.size };
-        $("textPreviewTitle").textContent = task.file.name; $("textPreviewEncoding").value = "auto";
-        $("textPreviewWrap").checked = false; $("textPreviewContent").classList.remove("wrap-lines");
-        $("textPreviewContent").scrollLeft = 0; $("textPreviewContent").scrollTop = 0;
-        this.renderText(); $("textPreviewDialog").showModal(); return;
+        this.showTextPreview({ file: task.file, bytes, truncated: bytes.length < task.file.size, location: task.location }); return;
       }
       const blob = new Blob(task.chunks, { type: task.file.mime || "application/octet-stream" });
       this.cached = { file: task.file, url: URL.createObjectURL(blob) };
@@ -132,8 +141,40 @@ window.FileDownloads = class FileDownloads {
   disconnect() { if (this.active) this.cancel("连接已断开，请重新下载"); }
   download(cached) { const link = document.createElement("a"); link.href = cached.url; link.download = cached.file.name; document.body.append(link); link.click(); link.remove(); }
   clearCached() { if (this.cached) URL.revokeObjectURL(this.cached.url); this.cached = null; }
+  showTextPreview(preview) {
+    this.textPreview = preview;
+    $("textPreviewTitle").textContent = preview.file.name; $("textPreviewEncoding").value = "auto";
+    $("textPreviewLanguage").value = "auto";
+    $("textPreviewDialog").classList.toggle("preview-unavailable", !!preview.unsupported);
+    const downloadLabel = preview.unsupported ? "下载文件" : "下载完整文本文件";
+    $("textPreviewDownload").setAttribute("aria-label", downloadLabel); $("textPreviewDownload").title = downloadLabel;
+    $("textPreviewWrap").checked = false; $("textPreviewContent").classList.remove("wrap-lines");
+    $("textPreviewContent").scrollLeft = 0; $("textPreviewContent").scrollTop = 0;
+    this.renderText();
+    if (!$("textPreviewDialog").open) $("textPreviewDialog").showModal();
+    $("textPreviewContent").scrollTop = 0; $("textPreviewContent").scrollLeft = 0;
+    this.locatePreview();
+  }
+  locatePreview() {
+    cancelAnimationFrame(this.locationFrame);
+    const preview = this.textPreview;
+    this.locationFrame = requestAnimationFrame(() => {
+      if (preview !== this.textPreview || !$("textPreviewDialog").open) return;
+      const container = $("textPreviewContent"), anchor = container.querySelector(".text-preview-anchor");
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect(), bounds = container.getBoundingClientRect();
+      container.scrollTop = Math.max(0, container.scrollTop + rect.top - bounds.top - container.clientHeight / 3);
+      container.scrollLeft = $("textPreviewWrap").checked ? 0 : Math.max(0, container.scrollLeft + rect.left - bounds.left - container.clientWidth / 3);
+    });
+  }
   renderText() {
+    this.highlighter.cancel();
     const preview = this.textPreview; if (!preview) return;
+    if (preview.unsupported) {
+      $("textPreviewContent").textContent = "";
+      $("textPreviewNote").textContent = FileDownloads.size(preview.file.size) + " · 此格式暂不支持在线预览，可点击下载按钮后在本地打开。";
+      return;
+    }
     const bytes = preview.bytes; let encoding = $("textPreviewEncoding").value;
     const decode = label => new TextDecoder(label, { fatal: true }).decode(bytes, { stream: preview.truncated });
     try {
@@ -145,6 +186,32 @@ window.FileDownloads = class FileDownloads {
       if (text.includes("\u0000")) throw new Error("binary content");
       $("textPreviewContent").textContent = text;
       $("textPreviewNote").textContent = (preview.truncated ? "仅预览前 1 MiB；下载可获取完整文件" : bytes.length ? FileDownloads.size(bytes.length) : "空文件") + " · " + encoding.toUpperCase();
+      const range = window.ChatUI.textLocation(text, preview.location);
+      if (range?.found) {
+        $("textPreviewContent").replaceChildren(window.ChatUI.previewFragment(text, null, range));
+        $("textPreviewNote").textContent += " · 已定位第 " + range.line + (range.endLine > range.line ? "–" + range.endLine : "") + " 行";
+        this.locatePreview();
+      } else if (range) {
+        $("textPreviewNote").textContent += preview.truncated ? " · 第 " + preview.location.line + " 行不在当前预览范围内，请下载完整文件" : " · 目标第 " + preview.location.line + " 行超出文件范围（共 " + range.totalLines + " 行）";
+      }
+      const selection = $("textPreviewLanguage").value;
+      const language = selection === "auto" ? window.ChatUI.previewLanguageForFile(preview.file.name) : selection === "plain" ? null : selection;
+      const note = $("textPreviewNote").textContent;
+      if (language) {
+        $("textPreviewNote").textContent = note + " · 正在着色…";
+        this.highlighter.highlight(text, language, result => {
+          if (this.textPreview !== preview) return;
+          const content = $("textPreviewContent"), top = content.scrollTop, left = content.scrollLeft;
+          let fallback = result.fallback;
+          if (result.tree) {
+            try { content.replaceChildren(window.ChatUI.previewFragment(text, result.tree, range)); }
+            catch { fallback = "complex"; }
+          }
+          content.scrollTop = top; content.scrollLeft = left;
+          const label = window.ChatUI.previewLanguages.find(item => item.id === language)?.label || "纯文本";
+          $("textPreviewNote").textContent = note + " · " + (fallback ? fallback === "large" ? "内容较长，使用纯文本" : "高亮不可用，使用纯文本" : label);
+        });
+      }
     } catch {
       $("textPreviewContent").textContent = "";
       $("textPreviewNote").textContent = "无法按此编码预览，或内容不是文本；可更换编码或下载文件。";
