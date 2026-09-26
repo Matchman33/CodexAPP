@@ -57,5 +57,30 @@ try {
   assert.equal((await page.evaluate(() => window.linkDownloadCalls))[0].preview, true, "点击文件超链接必须预览而不是下载");
   await page.getByRole("button", { name: "旧占位链接", exact: true }).focus(); await page.keyboard.press("Enter");
   assert.equal(page.url(), origin + "/");
+  await page.evaluate(() => {
+    const row = document.querySelector("#link-fixture"), body = row.querySelector(".body");
+    const files = [{ id: "markdown", name: "说明.md", size: 12, reference: "C:\\User Files\\说明.md:12", references: ["C:\\User Files\\说明.md:12", "docs/说明.md"] }];
+    body.innerHTML = window.ChatUI.markdown("`C:\\User Files\\说明.md:12`\n\nC:\\User Files\\说明.md:12\n\n[`docs/说明.md`](docs/说明.md)\n\n[`docs/说明.md`](https://example.invalid/)\n\n`C:\\missing\\readme.md`\n\n`cat docs/说明.md`\n\n```text\ndocs/说明.md\n```", files);
+    fileDownloads.render(row, { kind: "item:agentMessage", files });
+    window.copiedPaths = [];
+    document.execCommand = command => { if (command === "copy") { window.copiedPaths.push(document.activeElement.value); return true; } return false; };
+  });
+  assert.equal(await page.evaluate(() => !!navigator.clipboard), false, "Fixture must reproduce ordinary HTTP clipboard behavior");
+  assert.equal(await page.locator('#link-fixture .body a[href="#codex-file-0"]').count(), 3);
+  assert.equal(await page.locator("#link-fixture .body a a, #link-fixture pre a").count(), 0);
+  assert.equal(await page.getByRole("link", { name: "cat docs/说明.md", exact: true }).count(), 0);
+  assert.equal(await page.locator('#link-fixture .body a[href="https://example.invalid/"]').count(), 1);
+  const local = page.locator('#link-fixture .body a[data-codex-reference="C:\\\\User Files\\\\说明.md:12"]').first();
+  assert.equal(await local.getAttribute("data-source-line"), "12");
+  await page.locator("#link-fixture .body .file-reference-copy").first().click();
+  await page.waitForFunction(() => window.copiedPaths.length === 1);
+  assert.equal((await page.evaluate(() => window.copiedPaths))[0], "C:\\User Files\\说明.md:12");
+  await page.getByRole("button", { name: "复制路径：C:\\missing\\readme.md", exact: true }).click();
+  await page.waitForFunction(() => window.copiedPaths.length === 2);
+  assert.equal((await page.evaluate(() => window.copiedPaths))[1], "C:\\missing\\readme.md");
+  await page.evaluate(() => { const row = document.querySelector("#link-fixture"); row._copyText = "reply fixture"; addMessageActions(row); });
+  await page.getByRole("button", { name: "复制回复", exact: true }).click();
+  await page.waitForFunction(() => window.copiedPaths.length === 3);
+  assert.equal((await page.evaluate(() => window.copiedPaths))[2], "reply fixture");
   console.log("PASS: IP and port web links, unavailable file feedback, no placeholder navigation; network requests mocked locally");
 } finally { await browser.close(); }

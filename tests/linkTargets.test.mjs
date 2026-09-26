@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FileAttachments, fileReferences } from "../core/fileAttachments.mjs";
-import { localFileTarget, webLinkTarget, fileLinkLocation, textLocation } from "../core/linkTargets.mjs";
+import { localFileTarget, webLinkTarget, fileLinkLocation, textLocation, markdownPathReference } from "../core/linkTargets.mjs";
 
 test("带行号的源码链接能登记为原文件，不把行号当作文件名", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codexapp-links-"));
@@ -51,4 +51,14 @@ test("网页地址与文件地址分类一致，不把 IP 端口或协议地址�
   assert.equal(localFileTarget("demo.js:12"), "demo.js");
   for (const href of ["javascript:alert(1)", "data:text/html,fixture", "mailto:test@example.invalid", "#section"]) assert.equal(localFileTarget(href), null);
   assert.equal(localFileTarget("sandbox:/mnt/data/demo.pdf"), "sandbox:/mnt/data/demo.pdf");
+});
+
+test("独立 Markdown 本地路径可登记，命令和网页不是文件引用", () => {
+  for (const ref of ["docs/说明.md", "C:\\User Files\\说明.md", "/C:/User Files/说明.md:12", "file:///C:/docs/readme.md", "/project/readme.md", "README.md"]) {
+    assert.equal(markdownPathReference(ref), ref);
+    assert.deepEqual(fileReferences(ref), [ref]);
+  }
+  for (const ref of ["cat docs/readme.md", "npm run docs/readme.md", "https://example.invalid/readme.md"]) assert.equal(markdownPathReference(ref), null);
+  assert.deepEqual(fileReferences("[README.md](docs/README.md)"), ["docs/README.md"], "链接标签不能重复登记或占用引用额度");
+  assert.deepEqual(fileReferences("```text\ndocs/README.md\n```"), []);
 });

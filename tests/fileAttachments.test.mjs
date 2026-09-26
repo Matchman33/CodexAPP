@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { FileAttachments, FILE_LIMITS, fileReferences } from "../core/fileAttachments.mjs";
 import { itemToEvent } from "../core/threadDisplay.mjs";
 import { HistoryPager } from "../core/historyPaging.mjs";
@@ -29,6 +30,26 @@ test("同一文件的相对和绝对链接都映射到同一附件", t => {
   assert.equal(result.files.length, 1);
   assert.deepEqual(result.files[0].references, ["chart.png", absolute]);
 });
+
+test("项目外 Markdown 链接通过附件通道读取，仍拒绝隐藏文件", async t => {
+  const { root, temp, store, write } = fixture(t);
+  const absolute = write("docs/说明.md", "# 本地 Markdown\n正文");
+  for (const text of [absolute, "docs/说明.md", "`docs/说明.md`"]) {
+    const event = store.decorateEvent({ kind: "item:agentMessage", text, threadId: "one" }, { cwd: root, threadId: "one" });
+    assert.equal(event.files?.length, 1);
+    const chunk = await store.read({ attachmentId: event.files[0].id, threadId: "one" });
+    assert.equal(Buffer.from(chunk.data, "base64").toString(), "# 本地 Markdown\n正文");
+  }
+  const outside = path.join(temp, "desktop.md"); fs.writeFileSync(outside, "# 桌面文档");
+  for (const reference of [outside, "../desktop.md", pathToFileURL(outside).href]) {
+    const event = store.decorateEvent({ kind: "item:agentMessage", text: "[桌面文档](" + reference + ")", threadId: "one" }, { cwd: root, threadId: "one" });
+    assert.equal(event.files?.length, 1, reference);
+    const chunk = await store.read({ attachmentId: event.files[0].id, threadId: "one" });
+    assert.equal(Buffer.from(chunk.data, "base64").toString(), "# 桌面文档");
+  }
+  const hidden = write(".private/secret.md", "private");
+  assert.equal(store.decorateEvent({ kind: "item:agentMessage", text: hidden, threadId: "one" }, { cwd: root, threadId: "one" }).files, undefined);
+});
 test("附件必须被登记并绑定会话，二进制分块与原文件逐字节一致", async t => {
   const { store, write } = fixture(t), bytes = crypto.randomBytes(FILE_LIMITS.chunkBytes * 2 + 17);
   write("exports/报表.xlsx", bytes);
@@ -41,33 +62,38 @@ test("附件必须被登记并绑定会话，二进制分块与原文件逐字�
   await assert.rejects(store.read({ attachmentId: "exports/报表.xlsx", threadId: "one" }));
   for (const offset of [-1, 1, 0.5, bytes.length + 1, Infinity]) await assert.rejects(store.read({ attachmentId: file.id, threadId: "one", offset }));
 });
-test("拒绝目录穿越、网络路径、凭据、隐藏目录、硬链接与超大文件", t => {
+test("拒绝网络路径、凭据、隐藏目录、硬链接与超大文件", t => {
   const { store, write, root, temp } = fixture(t);
-  fs.writeFileSync(path.join(temp, "outside.txt"), "private");
+  fs.writeFileSync(path.join(temp, "outside.txt"), "outside");
+  fs.mkdirSync(path.join(temp, ".secrets")); fs.writeFileSync(path.join(temp, ".secrets", "note.txt"), "private");
+  fs.writeFileSync(path.join(temp, "auth.json"), "private");
   write("codexapp.config.json"); write(".env"); write(".codex/auth.json"); write("secret.pem"); write("normal.txt");
-  for (const reference of ["../outside.txt", "..%2Foutside.txt", path.join(temp, "outside.txt"), "https://example.invalid/a.xlsx", "\\\\server\\share\\a.pdf", "codexapp.config.json", ".codex/auth.json", ".env", "secret.pem", "normal.txt:secret", "data:text/plain,abc"]) assert.equal(store.register(reference, "one"), null, reference);
+  for (const reference of ["../outside.txt", "..%2Foutside.txt", path.join(temp, "outside.txt")]) assert.equal(store.register(reference, "one")?.name, "outside.txt", reference);
+  for (const reference of ["https://example.invalid/a.xlsx", "\\\\server\\share\\a.pdf", "codexapp.config.json", ".codex/auth.json", ".env", "secret.pem", "normal.txt:secret", "data:text/plain,abc", path.join(temp, ".secrets", "note.txt"), path.join(temp, "auth.json")]) assert.equal(store.register(reference, "one"), null, reference);
   fs.linkSync(path.join(temp, "outside.txt"), path.join(root, "hardlink.txt"));
   assert.equal(store.register("hardlink.txt", "one"), null);
   const big = write("big.zip"); fs.truncateSync(big, FILE_LIMITS.maxBytes + 1);
   assert.equal(store.register("big.zip", "one"), null);
 });
-test("符号链接指向项目外时不能登记，登记后切换目标也不能继续读取", async t => {
+test("符号链接指向项目外可重新登记，但登记后切换目标不能继续读取", async t => {
   const { store, write, root, temp } = fixture(t);
   write("inside/a.txt", "inside"); const outside = path.join(temp, "outside"); fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, "a.txt"), "outside");
   const link = path.join(root, "link"); fs.symlinkSync(path.join(root, "inside"), link, process.platform === "win32" ? "junction" : "dir");
   const file = store.register("link/a.txt", "one"); assert(file);
   fs.unlinkSync(link); fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(store.read({ attachmentId: file.id, threadId: "one" }));
-  assert.equal(store.register("link/a.txt", "one"), null);
+  const external = store.register("link/a.txt", "one"); assert(external);
+  assert.equal(Buffer.from((await store.read({ attachmentId: external.id, threadId: "one" })).data, "base64").toString(), "outside");
 });
-test("项目本身是目录链接时，仍允许工作目录内文件且拒绝外部目标", async t => {
+test("项目本身是目录链接时，仍允许工作目录内和项目外文件", async t => {
   const { store, write, root, temp } = fixture(t); write("result.txt", "inside");
+  fs.writeFileSync(path.join(temp, "outside.txt"), "outside");
   const alias = path.join(temp, "workspace-alias"); fs.symlinkSync(root, alias, process.platform === "win32" ? "junction" : "dir");
   try {
     store.remember("alias", alias);
     const file = store.register(path.join(alias, "result.txt"), "alias"); assert(file);
     assert.equal(Buffer.from((await store.read({ attachmentId: file.id, threadId: "alias" })).data, "base64").toString(), "inside");
-    assert.equal(store.register("../private.txt", "alias"), null);
+    assert.equal(store.register("../outside.txt", "alias")?.name, "outside.txt");
   } finally { fs.unlinkSync(alias); }
 });
 test("大量外部链接不会挤掉本地附件名额，已完成工具事件推送可下载文件", t => {

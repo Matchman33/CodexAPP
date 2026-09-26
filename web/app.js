@@ -1146,7 +1146,7 @@ function addMessageActions(div) {
   copy.innerHTML = '<i data-lucide="copy"></i>';
   copy.onclick = async () => {
     try {
-      await navigator.clipboard.writeText(div._copyText ?? div._event?.text ?? "");
+      await window.ChatUI.copyText(div._copyText ?? div._event?.text ?? "");
       copy.innerHTML = '<i data-lucide="check"></i>'; window.ChatUI.icons(copy); copy.title = "已复制";
       setTimeout(() => { copy.innerHTML = '<i data-lucide="copy"></i>'; window.ChatUI.icons(copy); copy.title = div._event?.truncated ? "复制当前段" : "复制回复"; }, 1800);
     } catch { copy.title = "复制失败，请选择文字复制"; }

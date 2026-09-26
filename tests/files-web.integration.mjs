@@ -11,11 +11,14 @@ import { chromium } from "@playwright/test";
 import WebSocket from "ws";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexapp-file-web-"));
+const externalRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codexapp-file-external-"));
+const externalFile = path.join(externalRoot, "desktop.md"), externalText = "# 项目外文档\n可以从网页预览";
 const workbook = crypto.randomBytes(192 * 1024 * 2 + 257), pdf = Buffer.from("%PDF-1.4\ntransport fixture\n%%EOF");
 const textFixtures = { "notes.txt": "你好，文本预览。\n<script>window.__textExecuted = true</script>\n第二行", "readme.md": "# 文本标题\n\n**保留 Markdown 原文**", "data.json": '{"测试":true}', "data.csv": "名称,数量\n苹果,3", "long.txt": "长文本\n".repeat(220000), "empty.txt": "" };
 let child, browser, observer, proxy;
 const proxySockets = new Set();
 try {
+  await fs.writeFile(externalFile, externalText);
   await fs.cp("core", path.join(root, "core"), { recursive: true }); await fs.mkdir(path.join(root, "relay"));
   await fs.copyFile("relay/server.mjs", path.join(root, "relay/server.mjs"));
   for (const name of ["web", "node_modules"]) await fs.symlink(path.resolve(name), path.join(root, name), process.platform === "win32" ? "junction" : "dir");
@@ -27,7 +30,7 @@ try {
   const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));
   const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
   await fs.writeFile(path.join(root, "codexapp.config.json"), JSON.stringify({ codexBin: process.execPath, host: "127.0.0.1", port, token: "files-fixture", defaultCwd: root, preventSleep: false }));
-  child = spawn(process.execPath, [path.join(root, "relay/server.mjs")], { cwd: root, env: { ...process.env, NODE_OPTIONS: "--import=" + pathToFileURL(path.resolve("tests/fixtures/filesCodex.mjs")).href, CODEX_HOME: path.join(root, "home"), CODEXAPP_PREVENT_SLEEP: "0" }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn(process.execPath, [path.join(root, "relay/server.mjs")], { cwd: root, env: { ...process.env, NODE_OPTIONS: "--import=" + pathToFileURL(path.resolve("tests/fixtures/filesCodex.mjs")).href, CODEX_HOME: path.join(root, "home"), CODEXAPP_PREVENT_SLEEP: "0", CODEXAPP_TEST_EXTERNAL_FILE: externalFile }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   let log = ""; child.stdout.on("data", b => { log += b; }); child.stderr.on("data", b => { log += b; });
   const upstreamUrl = "http://127.0.0.1:" + port;
   let healthy = false;
@@ -57,8 +60,20 @@ try {
   await page.locator("#sessionsBtn").click(); await page.locator('.session-item[data-thread-id="one"]').click();
   await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).waitFor();
   assert.equal(await page.locator("#downloadBar, #downloadStatus, #saveDownloadedFile, #cancelDownload").count(), 0);
-  assert.equal(await page.locator(".file-attachment").count(), 12);
-  await page.getByRole("button", { name: "项目外文件", exact: true }).click();
+  assert.equal(await page.locator(".file-attachment").count(), 13);
+  await page.getByRole("link", { name: "桌面文档", exact: true }).click();
+  await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#textPreviewContent").textContent(), externalText);
+  await page.locator("#textPreviewClose").click();
+  const markdownReference = page.getByRole("link", { name: "exports/readme.md", exact: true });
+  assert.equal(await markdownReference.count(), 1, "已登记的行内代码文件名不能只是着色，必须可点击预览");
+  await markdownReference.click();
+  await page.locator("#textPreviewDialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#textPreviewTitle").textContent(), "readme.md");
+  assert.equal(await page.locator("#textPreviewContent").textContent(), textFixtures["readme.md"]);
+  assert.equal(receivedDownloads.length, 0);
+  await page.locator("#textPreviewClose").click();
+  await page.getByRole("button", { name: "不存在文件", exact: true }).click();
   await page.locator(".file-message").filter({ hasText: "未开放下载" }).waitFor(); assert.equal(page.url(), url + "/");
   const firstId = await page.evaluate(() => historyFeed.events.find(e => e.files?.length).files[0].id);
   const observed = []; observer = new WebSocket("ws://127.0.0.1:" + port + "/ws?token=files-fixture"); observer.on("message", raw => observed.push(JSON.parse(raw))); await once(observer, "open");
@@ -151,7 +166,7 @@ try {
   assert.deepEqual(errors, []); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert(networkUrls.some(address => address.startsWith("ws://phone-gateway.test:" + proxyPort + "/ws")));
   assert(!networkUrls.some(address => /^(https?|wss?):\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(address)), "手机浏览器不能请求电脑的回环地址");
-  console.log(JSON.stringify({ width: 390, passed: "无全局下载状态栏、聊天内下载和取消、纯文本预览与安全显示、编码切换、长文本有界预览、NPS 转发和图片/Excel/PDF 回归", modelPromptsSent: 0 }));
+  console.log(JSON.stringify({ width: 390, passed: "项目外 Markdown 预览、缺失文件提示、聊天内下载和取消、文本预览、编码切换、长文本有界预览、NPS 转发和图片/Excel/PDF 回归", modelPromptsSent: 0 }));
 } finally {
   observer?.terminate(); if (browser) await browser.close();
   for (const socket of proxySockets) socket.destroy();
@@ -160,4 +175,6 @@ try {
   for (const name of ["node_modules", "web"]) { try { await fs.unlink(path.join(root, name)); } catch (error) { if (error.code !== "ENOENT") throw error; } }
   const resolved = path.resolve(root); assert(resolved.startsWith(path.resolve(os.tmpdir()) + path.sep)); assert(path.basename(resolved).startsWith("codexapp-file-web-"));
   await fs.rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  const externalResolved = path.resolve(externalRoot); assert(externalResolved.startsWith(path.resolve(os.tmpdir()) + path.sep)); assert(path.basename(externalResolved).startsWith("codexapp-file-external-"));
+  await fs.rm(externalResolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

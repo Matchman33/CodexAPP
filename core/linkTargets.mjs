@@ -22,6 +22,13 @@ export function localFileTarget(value) {
   return href.replace(/^\/(?=[a-z]:[\\/])/i, "");
 }
 
+export function markdownPathReference(value) {
+  const target = localFileTarget(value);
+  if (!target || !/\.md$/i.test(target) || /[\r\n`<>|?*]/.test(target)) return null;
+  if (/\s/.test(target) && !/^(?:[a-z]:[\\/]|\/|file:|sandbox:)/i.test(target)) return null;
+  return value.trim();
+}
+
 export function fileLinkLocation(value) {
   if (localFileTarget(value) === null) return null;
   const match = value.trim().match(sourceSuffix);

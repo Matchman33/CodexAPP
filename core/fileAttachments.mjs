@@ -4,23 +4,25 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { marked } from "marked";
-import { localFileTarget } from "./linkTargets.mjs";
+import { localFileTarget, markdownPathReference } from "./linkTargets.mjs";
 
 export const FILE_LIMITS = { maxBytes: 32 * 1024 * 1024, chunkBytes: 192 * 1024, perEvent: 12, entries: 512 };
 const imageTypes = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
 const documentTypes = { ".pdf": "application/pdf", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xls": "application/vnd.ms-excel", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".csv": "text/csv", ".zip": "application/zip" };
 const extensions = new Set("png jpg jpeg webp gif bmp svg pdf xlsx xls csv ods docx doc odt pptx ppt odp zip 7z tar gz txt md json html css js mjs ts py c cpp h mp3 wav mp4 webm".split(" ").map(ext => "." + ext));
-const inside = (root, file) => { const relative = path.relative(root, file); return relative !== "" && !relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative); };
 const privatePath = relative => relative.split(/[\\/]/).some(part => part.startsWith(".") || ["node_modules", "codexapp.config.json", "agent.config.json", "auth.json", "credentials.json", "secrets.json"].includes(part.toLowerCase()));
+const privateFile = file => privatePath(path.relative(path.parse(file).root, file));
 const fingerprint = stat => [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
 
 export function fileReferences(text) {
   const refs = [];
+  const labels = new WeakSet();
   // 使用现有 Markdown 解析器，支持带空格的 <路径> 和链接标题。
   try {
     marked.walkTokens(marked.lexer(String(text || "").slice(0, 262144)), token => {
-      if (refs.length >= FILE_LIMITS.perEvent) return;
-      const value = ["link", "image"].includes(token.type) ? token.href : token.type === "codespan" ? token.text : null;
+      if (refs.length >= FILE_LIMITS.perEvent || labels.has(token)) return;
+      if (["link", "image"].includes(token.type) && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
+      const value = ["link", "image"].includes(token.type) ? token.href : token.type === "codespan" ? token.text : token.type === "text" && !token.tokens ? markdownPathReference(token.text) : null;
       const target = localFileTarget(value);
       if (typeof value === "string" && value.length <= 4096 && target !== null) {
         try { if (extensions.has(path.extname(decodeURIComponent(target)).toLowerCase())) refs.push(value); } catch {}
@@ -46,8 +48,8 @@ export class FileAttachments {
     for (const [id, entry] of this.entries) if (entry.threadId === threadId) { this.entries.delete(id); this.keys.delete(entry.key); }
   }
   register(reference, threadId) {
-    const scope = this.roots.get(threadId), root = scope?.root;
-    if (!root || typeof reference !== "string" || reference.length > 4096) return null;
+    const scope = this.roots.get(threadId);
+    if (!scope || typeof reference !== "string" || reference.length > 4096) return null;
     try {
       let target = localFileTarget(reference);
       if (target === null) return null;
@@ -59,10 +61,8 @@ export class FileAttachments {
       }
       if (/[\x00-\x1f\x7f]/.test(target) || /^[/\\]{2}/.test(target) || target.replace(/^[a-z]:/i, "").includes(":")) return null;
       const file = path.resolve(scope.cwd, target);
-      const lexicalRoot = inside(scope.cwd, file) ? scope.cwd : root;
-      if (!inside(lexicalRoot, file) || privatePath(path.relative(lexicalRoot, file))) return null;
       const real = fs.realpathSync(file);
-      if (!inside(root, real) || privatePath(path.relative(root, real))) return null;
+      if (privateFile(file) || privateFile(real)) return null;
       const ext = path.extname(real).toLowerCase();
       if (!extensions.has(ext)) return null;
       const stat = fs.statSync(real);
@@ -72,7 +72,7 @@ export class FileAttachments {
       if (known) return { ...known.public, reference };
       const id = crypto.randomBytes(24).toString("base64url");
       const metadata = { id, threadId, name: path.basename(real), size: stat.size, mime: imageTypes[ext] || documentTypes[ext] || "application/octet-stream", preview: !!imageTypes[ext] };
-      this.entries.set(id, { key, file, real, root, stamp, threadId, public: metadata }); this.keys.set(key, id);
+      this.entries.set(id, { key, file, real, stamp, threadId, public: metadata }); this.keys.set(key, id);
       while (this.entries.size > FILE_LIMITS.entries) { const oldest = this.entries.keys().next().value; this.keys.delete(this.entries.get(oldest).key); this.entries.delete(oldest); }
       return { ...metadata, reference };
     } catch { return null; }
@@ -107,7 +107,7 @@ export class FileAttachments {
     let handle;
     try {
       const real = await fsp.realpath(entry.file);
-      if (real !== entry.real || !inside(entry.root, real)) throw new Error("文件路径已变化，请重新打开会话");
+      if (real !== entry.real || privateFile(real)) throw new Error("文件路径已变化，请重新打开会话");
       handle = await fsp.open(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
       const stat = await handle.stat();
       if (!stat.isFile() || stat.nlink > 1 || fingerprint(stat) !== entry.stamp || await fsp.realpath(entry.file) !== real) throw new Error("文件已变化，请重新打开会话");

@@ -179,6 +179,8 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .file-description strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
 .file-description span { font-size: 11px; color: var(--muted); }
 .file-attachment .icon-btn { width: 36px; height: 36px; flex-basis: 36px; padding: 8px; }
+.markdown .file-reference-copy.icon-btn { width: 24px; height: 24px; padding: 4px; margin-left: 3px; vertical-align: middle; }
+.markdown code, .file-description strong { user-select: text; -webkit-user-select: text; }
 .file-feedback, .file-message { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .file-message { margin: 8px 0; }
 .text-preview-dialog { width: min(900px, calc(100vw - 24px)); height: min(680px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }

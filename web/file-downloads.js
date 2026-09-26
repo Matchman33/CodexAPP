@@ -20,6 +20,7 @@ window.FileDownloads = class FileDownloads {
   }
   render(row, event) {
     row.querySelector(".file-attachments")?.remove();
+    row.querySelectorAll(".file-reference-copy").forEach(button => button.remove());
     const files = this.supported ? event.files || [] : [];
     const list = document.createElement("div"); list.className = "file-attachments"; list.setAttribute("aria-label", event.kind === "item:fileChange" ? "变更文件附件" : "生成的文件");
     for (const file of files.slice(0, 12)) {
@@ -34,6 +35,7 @@ window.FileDownloads = class FileDownloads {
       const kind = FileDownloads.previewKind(file);
       if (kind) card.append(this.button("eye", (kind === "text" ? "预览文本：" : "预览图片：") + file.name, () => this.start(file, true)));
       card.append(this.button("download", "下载文件：" + file.name, () => this.start(file, false)));
+      card.append(this.pathCopyButton(file.reference || file.references?.[0] || file.name, "复制文件路径：" + file.name));
       const cancel = this.button("x", "取消接收：" + file.name, () => this.cancel()); cancel.dataset.fileCancel = "true"; card.append(cancel);
       this.updateCard(card);
       list.append(card);
@@ -43,6 +45,10 @@ window.FileDownloads = class FileDownloads {
       container.append(list); window.ChatUI.icons(list);
     }
     for (const link of row.querySelectorAll(".body a")) {
+      const followingText = link.nextSibling?.nodeType === Node.TEXT_NODE ? link.nextSibling.textContent : "";
+      if (link.dataset.codexReference) {
+        const copy = this.pathCopyButton(link.dataset.codexReference); copy.classList.add("file-reference-copy"); link.after(copy);
+      }
       const reference = link.getAttribute("href");
       const marker = /^#codex-(file|preview)-(\d+)$/.exec(reference || "");
       const file = marker ? files[Number(marker[2])] : files.find(file => file.reference === reference || file.references?.includes(reference));
@@ -52,7 +58,7 @@ window.FileDownloads = class FileDownloads {
           const value = Number(link.dataset["source" + key[0].toUpperCase() + key.slice(1)]);
           if (Number.isSafeInteger(value) && value > 0) location[key] = value;
         }
-        const suffix = link.nextSibling?.nodeType === Node.TEXT_NODE ? link.nextSibling.textContent.match(/^:\d+(?::\d+)?(?:-\d+(?::\d+)?)?(?=$|\s|[，。,.);])/u)?.[0] : null;
+        const suffix = followingText.match(/^:\d+(?::\d+)?(?:-\d+(?::\d+)?)?(?=$|\s|[，。,.);])/u)?.[0];
         const target = location.line ? location : window.ChatUI.fileLinkLocation(reference) || (suffix ? window.ChatUI.fileLinkLocation(file.name + suffix) : null);
         link.removeAttribute("target"); link.onclick = e => { e.preventDefault(); this.start(file, true, target); };
       }
@@ -84,7 +90,7 @@ window.FileDownloads = class FileDownloads {
     const feedback = card.querySelector(".file-feedback"); feedback.textContent = this.messages.get(id) || ""; feedback.classList.toggle("hidden", !feedback.textContent);
     for (const button of card.querySelectorAll("button")) {
       if (button.dataset.fileCancel) button.classList.toggle("hidden", !busy);
-      else button.disabled = busy;
+      else button.disabled = button.dataset.fileCopy ? false : busy;
     }
   }
   start(file, preview, location = null) {
@@ -154,6 +160,17 @@ window.FileDownloads = class FileDownloads {
     if (!$("textPreviewDialog").open) $("textPreviewDialog").showModal();
     $("textPreviewContent").scrollTop = 0; $("textPreviewContent").scrollLeft = 0;
     this.locatePreview();
+  }
+  pathCopyButton(reference, label = "复制路径：" + reference) {
+    const button = this.button("copy", label, async () => {
+      try {
+        await window.ChatUI.copyText(reference);
+        button.innerHTML = '<i data-lucide="check"></i>'; window.ChatUI.icons(button); button.title = "已复制路径";
+        setTimeout(() => { button.innerHTML = '<i data-lucide="copy"></i>'; window.ChatUI.icons(button); button.title = label; }, 1800);
+      } catch { button.title = "复制失败，请选择文字复制"; }
+    });
+    button.dataset.fileCopy = "true";
+    return button;
   }
   locatePreview() {
     cancelAnimationFrame(this.locationFrame);
