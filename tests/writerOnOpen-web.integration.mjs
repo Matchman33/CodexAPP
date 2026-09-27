@@ -14,6 +14,7 @@ try {
   await fs.cp("core", path.join(root, "core"), { recursive: true });
   await fs.mkdir(path.join(root, "relay"));
   await fs.copyFile("relay/server.mjs", path.join(root, "relay/server.mjs"));
+  await fs.copyFile("relay/transport.mjs", path.join(root, "relay/transport.mjs"));
   for (const directory of ["node_modules", "web"]) await fs.symlink(path.resolve(directory), path.join(root, directory), process.platform === "win32" ? "junction" : "dir");
   const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));
   const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));

@@ -16,6 +16,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
+import { LinkRouter } from "./linkRouter.mjs";
+import { verifyDeviceProof } from "./deviceIdentity.mjs";
 import * as db from "./db.mjs";
 import { sendVerifyEmail, sendResetEmail, emailConfigured, testSmtp, getSmtpConfig } from "./mailer.mjs";
 
@@ -59,18 +61,25 @@ const SECRET = loadSecret();
 const TOKEN_TTL_SEC = 30 * 24 * 3600; // 30 days
 
 function signToken(accountId) {
-  const payload = Buffer.from(JSON.stringify({ sub: accountId, exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SEC })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ sub: accountId, ver: db.getById(accountId)?.auth_version || 0, exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SEC })).toString("base64url");
   const sig = crypto.createHmac("sha256", SECRET).update(payload).digest("base64url");
   return payload + "." + sig;
 }
-function verifyToken(token) {
+function tokenPayload(token) {
   if (typeof token !== "string" || !token.includes(".")) return null;
   const [payload, sig] = token.split(".");
-  if (!payload || !sig) return null;
+  if (!payload || !sig || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return null;
   const expect = crypto.createHmac("sha256", SECRET).update(payload).digest("base64url");
   if (sig.length !== expect.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect))) return null;
   let p; try { p = JSON.parse(Buffer.from(payload, "base64url").toString()); } catch { return null; }
-  if (!p.sub || !p.exp || p.exp < Math.floor(Date.now() / 1000)) return null;
+  if (typeof p.sub !== "string" || !Number.isFinite(p.exp)) return null;
+  return p;
+}
+function verifyToken(token) {
+  const p = tokenPayload(token);
+  if (!p || p.exp <= Math.floor(Date.now() / 1000)) return null;
+  const account = db.getById(p.sub);
+  if (!account || account.disabled || (p.ver || 0) !== account.auth_version) return null;
   return p.sub;
 }
 
@@ -85,14 +94,14 @@ function register(email, password) {
   const salt = crypto.randomBytes(16).toString("hex");
   const token = newVerifyToken();
   db.createAccount({ id, email, salt, hash: hashPw(password, salt), email_verified: 0, verify_token: token, verify_expires: Date.now() + VERIFY_TTL_MS, created_at: Date.now() });
-  if (TRIAL_DAYS > 0) db.setMembership(id, Date.now() + TRIAL_DAYS * DAY_MS); // free trial
   return { accountId: id, verifyToken: token };
 }
 function login(email, password) {
   const acc = db.getByEmail(email);
   if (!acc || !eq(hashPw(password, acc.salt), acc.hash)) return { ok: false, code: "invalid" };
+  if (acc.disabled) return { ok: false, code: "account_disabled" };
   if (!acc.email_verified) return { ok: false, code: "unverified" };
-  return { ok: true, token: signToken(acc.id), accountId: acc.id, membershipUntil: acc.membership_until || 0 };
+  return { ok: true, token: signToken(acc.id), accountId: acc.id };
 }
 function issueVerify(email) {
   const acc = db.getByEmail(email);
@@ -109,35 +118,6 @@ function issueReset(email) {
   return token;
 }
 
-// ---- membership (cloud only; LAN mode never touches the broker, so it's free) ----
-const LIFETIME_TS = 4102444800000; // 2100-01-01: "lifetime" membership sentinel
-const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7); // free trial on registration
-const DAY_MS = 86400000;
-const isMember = (acc) => !!acc && (acc.membership_until || 0) > Date.now();
-
-// Human-friendly code, no ambiguous chars (0/O/1/I/L). e.g. CDX-ABCD-EFGH-JKMN
-const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-function genCode() {
-  const b = crypto.randomBytes(12);
-  let s = "";
-  for (let i = 0; i < 12; i++) s += CODE_ALPHABET[b[i] % CODE_ALPHABET.length];
-  return `CDX-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`;
-}
-function redeem(accountId, codeRaw) {
-  const code = String(codeRaw || "").trim().toUpperCase();
-  if (!code) return { error: "请输入兑换码" };
-  const c = db.getCode(code);
-  if (!c) return { error: "兑换码无效" };
-  if (c.redeemed_by) return { error: "兑换码已被使用" };
-  if (c.expires_at && c.expires_at < Date.now()) return { error: "兑换码已过期" };
-  if (!db.redeemCode(code, accountId, Date.now())) return { error: "兑换码已被使用" }; // lost the atomic race
-  const acc = db.getById(accountId);
-  const base = Math.max(Date.now(), acc.membership_until || 0); // stack onto remaining time
-  const until = c.lifetime ? LIFETIME_TS : base + (c.days | 0) * DAY_MS;
-  db.setMembership(accountId, until);
-  return { ok: true, membershipUntil: until };
-}
-
 // ---- login/register rate limiting (per IP+email sliding window) ----
 const attempts = new Map();
 const RL_WINDOW = 15 * 60 * 1000, RL_MAX = 8;
@@ -149,10 +129,8 @@ function rateLimited(key) {
   return arr.length > RL_MAX;
 }
 
-// ---- routing: accountId -> { agent, phone } (one of each for v1) ----
-const rooms = new Map();
-function room(id) { if (!rooms.has(id)) rooms.set(id, { agent: null, phone: null }); return rooms.get(id); }
-const peerRole = (r) => (r === "agent" ? "phone" : "agent");
+const router = new LinkRouter();
+const rooms = router.rooms;
 
 function verifyPage(title, msg) {
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CodexApp</title>
@@ -237,12 +215,12 @@ async function handleAdmin(req, res) {
   if (G && p === "/api/admin/overview") {
     const online = [];
     for (const [aid, r] of rooms) {
-      if (!r.agent && !r.phone) continue;
+      if (!r.agent && !r.phones.size) continue;
       const acc = db.getById(aid);
-      online.push({ email: acc ? acc.email : aid.slice(0, 8), agent: !!r.agent, phone: !!r.phone });
+      online.push({ email: acc ? acc.email : aid.slice(0, 8), agent: !!r.agent, phone: !!r.phones.size, phoneCount: r.phones.size });
     }
-    const users = db.listAccounts(200).map((u) => ({ id: u.id, email: u.email, verified: !!u.email_verified, membershipUntil: u.membership_until || 0, createdAt: u.created_at }));
-    return res.end(JSON.stringify({ counts: db.counts(), online, users, lifetimeTs: LIFETIME_TS }));
+    const users = db.listAccounts(200).map((u) => ({ id: u.id, email: u.email, verified: !!u.email_verified, disabled: !!u.disabled, createdAt: u.created_at }));
+    return res.end(JSON.stringify({ counts: db.counts(), online, users }));
   }
   if (P && p === "/api/admin/user/verify") { const b = await readBody(req); if (b.id) db.setVerified(b.id); return res.end(JSON.stringify({ ok: true })); }
   if (P && p === "/api/admin/user/resend") {
@@ -254,49 +232,24 @@ async function handleAdmin(req, res) {
   if (P && p === "/api/admin/user/delete") {
     const b = await readBody(req);
     if (b.id) {
-      const r = rooms.get(b.id);
-      if (r) { try { r.agent && r.agent.close(); r.phone && r.phone.close(); } catch {} }
+      router.disconnectAccount(b.id);
       db.deleteAccount(b.id);
     }
     return res.end(JSON.stringify({ ok: true }));
   }
-
-  // Set/extend/revoke a user's membership.
-  if (P && p === "/api/admin/user/membership") {
+  if (P && p === "/api/admin/user/revoke-sessions") {
     const b = await readBody(req);
-    const acc = b.id && db.getById(b.id);
-    if (!acc) { res.writeHead(404); return res.end(JSON.stringify({ error: "账号不存在" })); }
-    let until;
-    if (b.revoke) until = 0;
-    else if (b.lifetime) until = LIFETIME_TS;
-    else { const base = Math.max(Date.now(), acc.membership_until || 0); until = base + (Number(b.addDays) || 0) * DAY_MS; }
-    db.setMembership(acc.id, until);
-    return res.end(JSON.stringify({ ok: true, membershipUntil: until }));
+    if (!b.id || !db.getById(b.id)) { res.writeHead(404); return res.end(JSON.stringify({ error: "账号不存在" })); }
+    db.revokeSessions(b.id); router.disconnectAccount(b.id);
+    return res.end(JSON.stringify({ ok: true }));
   }
-
-  // Generate redemption codes.
-  if (P && p === "/api/admin/codes/generate") {
+  if (P && p === "/api/admin/user/status") {
     const b = await readBody(req);
-    const count = Math.max(1, Math.min(500, Number(b.count) || 1));
-    const lifetime = !!b.lifetime;
-    const days = lifetime ? 0 : Math.max(1, Math.min(36500, Number(b.days) || 30));
-    const expiresAt = Number(b.expiresAt) > 0 ? Number(b.expiresAt) : null; // code redemption deadline; null = never
-    const note = (b.note || "").toString().slice(0, 120);
-    const out = [];
-    for (let i = 0; i < count; i++) {
-      let code, tries = 0;
-      do { code = genCode(); tries++; } while (db.getCode(code) && tries < 5);
-      try { db.createCode({ code, days, lifetime, note, created_at: Date.now(), expires_at: expiresAt }); out.push(code); } catch {}
-    }
-    return res.end(JSON.stringify({ ok: true, codes: out, days, lifetime, expiresAt }));
-  }
-  // List recent codes + stats.
-  if (G && p === "/api/admin/codes") {
-    const codes = db.listCodes(300).map((c) => ({
-      code: c.code, days: c.days, lifetime: !!c.lifetime, note: c.note || "",
-      createdAt: c.created_at, expiresAt: c.expires_at || 0, used: !!c.redeemed_by, redeemedAt: c.redeemed_at || 0,
-    }));
-    return res.end(JSON.stringify({ stats: db.codeStats(), codes }));
+    if (typeof b.disabled !== "boolean") { res.writeHead(400); return res.end(JSON.stringify({ error: "disabled 必须是布尔值" })); }
+    if (!b.id || !db.getById(b.id)) { res.writeHead(404); return res.end(JSON.stringify({ error: "账号不存在" })); }
+    db.setDisabled(b.id, b.disabled);
+    if (b.disabled) router.disconnectAccount(b.id, "account_disabled", "账号已被管理员停用，请联系管理员", 4003);
+    return res.end(JSON.stringify({ ok: true, disabled: b.disabled }));
   }
 
   res.writeHead(404); res.end(JSON.stringify({ error: "未知接口" }));
@@ -337,9 +290,10 @@ function requestHandler(req, res) {
       }
 
       const r = login(p.email, p.password);
+      if (!r.ok && r.code === "account_disabled") { res.writeHead(403); return res.end(JSON.stringify({ error: "账号已被管理员停用，请联系管理员", code: "account_disabled" })); }
       if (!r.ok && r.code === "unverified") { res.writeHead(403); return res.end(JSON.stringify({ error: "请先验证邮箱（查收验证邮件）", code: "unverified" })); }
       if (!r.ok) { res.writeHead(401); return res.end(JSON.stringify({ error: "邮箱或密码错误" })); }
-      res.end(JSON.stringify({ token: r.token, accountId: r.accountId, membershipUntil: r.membershipUntil }));
+      res.end(JSON.stringify({ token: r.token, accountId: r.accountId }));
     });
     return;
   }
@@ -358,25 +312,8 @@ function requestHandler(req, res) {
       if (!validPassword(p.password)) { res.writeHead(400); return res.end(JSON.stringify({ error: "密码至少 8 位" })); }
       const salt = crypto.randomBytes(16).toString("hex");
       db.updatePassword(acc.id, salt, hashPw(p.password, salt));
+      router.disconnectAccount(acc.id);
       return res.end(JSON.stringify({ ok: true }));
-    });
-    return;
-  }
-
-  // Redeem a membership code (auth via the JWT issued at login).
-  if (req.method === "POST" && req.url === "/api/redeem") {
-    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").toString().split(",")[0].trim();
-    let body = "";
-    req.on("data", (c) => { body += c; if (body.length > 4096) req.destroy(); });
-    req.on("end", () => {
-      let p; try { p = JSON.parse(body || "{}"); } catch { p = {}; }
-      res.setHeader("content-type", "application/json");
-      if (rateLimited("redeem|" + ip)) { res.writeHead(429); return res.end(JSON.stringify({ error: "尝试过于频繁，请稍后再试" })); }
-      const accountId = verifyToken(p.token);
-      if (!accountId) { res.writeHead(401); return res.end(JSON.stringify({ error: "登录已失效，请重新登录" })); }
-      const r = redeem(accountId, p.code);
-      if (r.error) { res.writeHead(400); return res.end(JSON.stringify({ error: r.error })); }
-      return res.end(JSON.stringify({ ok: true, membershipUntil: r.membershipUntil }));
     });
     return;
   }
@@ -401,7 +338,7 @@ function requestHandler(req, res) {
     res.setHeader("content-type", "text/html; charset=utf-8");
     if (acc && (!acc.verify_expires || acc.verify_expires > Date.now())) {
       db.setVerified(acc.id);
-      return res.end(verifyPage("✅ 邮箱验证成功", "账号已激活，现在可以在网页或 App 登录了。"));
+      return res.end(verifyPage("✅ 邮箱验证成功", acc.disabled ? "邮箱已验证，账号仍处于停用状态，请联系管理员。" : "账号已激活，现在可以在网页或 App 登录了。"));
     }
     res.writeHead(400);
     return res.end(verifyPage("⚠ 链接无效或已过期", "请回到登录页重新发送验证邮件。"));
@@ -432,57 +369,90 @@ const wss = new WebSocketServer({ server, path: "/link", maxPayload: 12 * 104857
 
 function sendJson(ws, obj) { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); }
 
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.accountId && !authorizeConnection(ws)) continue;
+    if (!ws.alive) { ws.terminate(); continue; }
+    ws.alive = false;
+    ws.ping();
+  }
+}, 30000);
+heartbeat.unref();
+wss.on("close", () => clearInterval(heartbeat));
+
+function authorizeConnection(ws) {
+  if (db.getById(ws.accountId)?.disabled) {
+    router.disconnectAccount(ws.accountId, "account_disabled", "账号已被管理员停用，请联系管理员", 4003); return false;
+  }
+  if (!verifyToken(ws.authToken)) {
+    router.leave(ws);
+    sendJson(ws, { type: "error", code: "session_revoked", message: "登录 token 已过期或撤销，请重新登录" });
+    ws.close(4001, "session revoked"); return false;
+  }
+  return true;
+}
+
 wss.on("connection", (ws) => {
   ws.on("error", () => {});
   ws.accountId = null; ws.role = null;
+  ws.alive = true;
+  ws.on("pong", () => { ws.alive = true; });
+  const authTimeout = setTimeout(() => { if (!ws.accountId) ws.close(4001, "authentication timeout"); }, 15000);
+  authTimeout.unref();
 
   ws.on("message", (raw) => {
+    if (ws.readyState !== ws.OPEN) return;
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (!m || typeof m !== "object") return;
 
     // First message must authenticate.
     if (!ws.accountId) {
+      if (m.type === "agentProof" && ws.pendingAuth) {
+        const pending = ws.pendingAuth; ws.pendingAuth = null;
+        if (db.getById(pending.accountId)?.disabled) {
+          sendJson(ws, { type: "error", code: "account_disabled", message: "账号已被管理员停用，请联系管理员" }); return ws.close(4003);
+        }
+        if (!verifyToken(pending.auth.token) || !verifyDeviceProof(pending.auth.deviceKey, pending.challenge, m.signature)) {
+          sendJson(ws, { type: "error", message: "invalid device proof or token" }); return ws.close(4001);
+        }
+        ws.authToken = pending.auth.token;
+        router.join(ws, pending.accountId, { ...pending.auth, identityVerified: true });
+        return;
+      }
       if (m.type !== "auth") { sendJson(ws, { type: "error", message: "auth required" }); return ws.close(4001); }
       const accountId = verifyToken(m.token);
-      if (!accountId) { sendJson(ws, { type: "error", message: "invalid token" }); return ws.close(4001); }
-      if (m.role !== "agent" && m.role !== "phone") { sendJson(ws, { type: "error", message: "bad role" }); return ws.close(4002); }
-      // Membership gate: cloud relay requires an active membership. LAN mode does
-      // not go through the broker, so it stays free regardless.
-      const acct = db.getById(accountId);
-      if (!isMember(acct)) {
-        sendJson(ws, { type: "error", code: "membership_required", message: "云端会员未开通或已过期，请用兑换码开通后使用（局域网模式免费）。" });
-        return ws.close(4003);
+      if (!accountId) {
+        const payload = tokenPayload(m.token), account = payload && db.getById(payload.sub);
+        if (account?.disabled) {
+          sendJson(ws, { type: "error", code: "account_disabled", message: "账号已被管理员停用，请联系管理员" }); return ws.close(4003);
+        }
+        const revoked = payload && (!account || (payload.ver || 0) !== account.auth_version);
+        sendJson(ws, { type: "error", ...(revoked ? { code: "session_revoked" } : {}), message: revoked ? "登录 token 已撤销，请重新登录" : "invalid token" });
+        return ws.close(4001);
       }
-      ws.accountId = accountId; ws.role = m.role; ws.pubkey = m.pubkey || null;
-      const rm = room(accountId);
-      rm[m.role] = ws;
-      const peer = rm[peerRole(m.role)];
-      sendJson(ws, { type: "authed", role: m.role, peerOnline: !!peer, peerPubkey: peer?.pubkey || null });
-      // Tell the peer we're online + our pubkey (for E2E key exchange).
-      if (peer) sendJson(peer, { type: "peer", online: true, pubkey: ws.pubkey });
-      console.log(`[broker] ${m.role} online for ${accountId.slice(0, 8)} (peer ${peer ? "online" : "offline"})`);
+      if (m.role !== "agent" && m.role !== "phone") { sendJson(ws, { type: "error", message: "bad role" }); return ws.close(4002); }
+      if (typeof m.pubkey !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(m.pubkey) || Buffer.from(m.pubkey, "base64").length !== 32) {
+        sendJson(ws, { type: "error", message: "invalid public key" }); return ws.close(4002);
+      }
+      if (m.role === "agent" && m.deviceKey) {
+        const challenge = "codexapp-agent:" + crypto.randomBytes(32).toString("base64url") + ":" + accountId + ":" + m.pubkey;
+        ws.pendingAuth = { auth: m, accountId, challenge };
+        sendJson(ws, { type: "agentChallenge", challenge }); return;
+      }
+      ws.authToken = m.token;
+      if (router.join(ws, accountId, { ...m, identityVerified: false })) console.log(`[broker] ${m.role} online for ${accountId.slice(0, 8)}`);
       return;
     }
 
     // After auth: only forward E2E envelopes to the peer. Broker can't read them.
-    if (m.type === "e2e") {
-      const rm = rooms.get(ws.accountId);
-      const peer = rm && rm[peerRole(ws.role)];
-      if (peer) sendJson(peer, { type: "e2e", from: ws.role, nonce: m.nonce, box: m.box });
-      else sendJson(ws, { type: "peer", online: false });
-      return;
-    }
+    if (authorizeConnection(ws)) router.forward(ws, m);
   });
 
   ws.on("close", () => {
+    clearTimeout(authTimeout); ws.pendingAuth = null;
     if (!ws.accountId) return;
-    const rm = rooms.get(ws.accountId);
-    if (rm && rm[ws.role] === ws) {
-      rm[ws.role] = null;
-      const peer = rm[peerRole(ws.role)];
-      if (peer) sendJson(peer, { type: "peer", online: false });
-      if (!rm.agent && !rm.phone) rooms.delete(ws.accountId);
-      console.log(`[broker] ${ws.role} offline for ${ws.accountId.slice(0, 8)}`);
-    }
+    router.leave(ws);
+    console.log(`[broker] ${ws.role} offline for ${ws.accountId.slice(0, 8)}`);
   });
 });
 

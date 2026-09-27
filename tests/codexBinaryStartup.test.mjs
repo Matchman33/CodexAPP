@@ -53,6 +53,7 @@ if (process.argv[1]?.endsWith('app-server')) {
     const serverRoot = path.join(root, "relay-app");
     await fs.mkdir(path.join(serverRoot, "relay"), { recursive: true });
     await fs.copyFile("relay/server.mjs", path.join(serverRoot, "relay/server.mjs"));
+    await fs.copyFile("relay/transport.mjs", path.join(serverRoot, "relay/transport.mjs"));
     await fs.cp("core", path.join(serverRoot, "core"), { recursive: true });
     await fs.symlink(path.resolve("node_modules"), path.join(serverRoot, "node_modules"), "junction");
     const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));

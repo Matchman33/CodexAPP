@@ -16,6 +16,7 @@ test("隔离直连中继支持图文、图片排队、纯图片纠偏和刷新�
     await fs.cp("core", path.join(root, "core"), { recursive: true });
     await fs.mkdir(path.join(root, "relay"));
     await fs.copyFile("relay/server.mjs", path.join(root, "relay/server.mjs"));
+    await fs.copyFile("relay/transport.mjs", path.join(root, "relay/transport.mjs"));
     await fs.symlink(path.resolve("node_modules"), path.join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
     const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));
     const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));

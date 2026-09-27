@@ -5,7 +5,7 @@
 让用户**装个 exe、登录同账号，就能从任何网络用手机控制电脑上的 Codex**——不用公网 IP、不用端口转发，且**服务器看不到你的内容**。
 
 ```
-[手机 App] ──WSS /link──►┌──────────────┐◄──WSS /link(出站)── [PC Agent] ──stdio──► [codex app-server]
+[手机 App] ──WSS /link──►┌──────────────┐◄──WSS /link(出站)── [PC Agent] ──本机中继──► [codex app-server]
   登录账号                │  云 Broker    │                      登录同账号              Codex 本体+认证+执行
   E2E 加密                │ 按账号配对    │                      E2E 解密/驱动 codex
                          │ 只转发密文    │
@@ -15,6 +15,33 @@
 - **PC Agent 主动外连 Broker**（出站连接天然穿 NAT/CGNAT，零网络配置）。
 - Broker 按**账号**把手机和这台 Agent 配对，**只转发端到端加密的密文**，自己读不懂。
 - 手机和 Agent 用 **NaCl box（Curve25519 + XSalsa20-Poly1305）** 端到端加密；密钥不出设备。
+
+## 多账号与多手机
+
+云账号连接免费使用，不需要会员、试用期或兑换码。账号仍需完成邮箱验证，并保持未停用状态。管理员可在后台停用或恢复账号；停用立即断开云连接并阻止再次登录，本机任务继续执行。
+
+支持多个账号各自连接一台 Agent；同一账号可以同时连接多个手机、浏览器或网页标签。不同账号的连接路由相互隔离，不支持跨账号分享 Agent，也不提供同账号多台电脑选择。
+
+登录后，Broker 用登录令牌中的 `accountId` 定位该账号唯一在线的 Agent，不需要手机填写电脑地址。电脑不在线时显示等待；另一台设备使用同账号上线会收到 `agent_already_online`。新版 Agent 使用设备私钥证明同设备身份后，可替换断网遗留的旧连接，不必等待心跳清理；旧 Agent 或主动换机仍需先退出原 Agent。详情见 [连接与会话优化](../docs/连接与会话优化.md)。
+
+账号定位和设备配对分开处理：
+
+- `pairingMode: "open"` 是当前默认值，同账号登录直接授权。
+- `pairingMode: "code"` 要求每台新手机输入电脑面板显示的配对码；校验绑定双方公钥，成功后 Agent 记住该手机公钥，后续免码。浏览器清除本地密钥后需要重新配对。
+- 多个手机共用同一台 Agent 的配对码，但各自使用设备密钥和独立信封。未配对的连接不能读取业务状态或执行命令。
+- 电脑面板显示在线连接数、已授权连接数和设备指纹。同一浏览器多个标签共享设备密钥，但连接和会话选择分别管理，因此连接数不等于物理手机数。
+
+每个手机独立选择会话；可以查看同一会话，也可以在不同会话中同时运行任务。审批只处理一次并同步结果，重复处理返回已失效；停止只作用于目标会话。只读历史、外部占用确认、权限延后生效、排队消息和终端输入控制规则沿用直连核心。断开某个手机只清理其订阅及终端查看状态，不停止后台任务、不释放其他手机的控制权。重新连接后可重新选择原会话读取快照；网页沿用已有的会话恢复逻辑，旧版原生客户端可能需要手动选择。
+
+云端账号隔离不等于同一操作系统内的文件权限隔离。同一电脑运行不同账号的 Agent 时，需要分别配置 `CODEXAPP_DIR`，并按需要隔离 Codex 环境及系统用户权限。
+
+### 升级与验证
+
+先更新并重启 Broker，再更新网页、Agent 和 Expo 客户端；已有 SEA/Electron 安装包需要重新构建。手机侧加密协议保持兼容，不必重新注册账号或重新生成已有设备密钥，但客户端需要更新以移除旧版会员判断。新版 Agent 遇到旧 Broker 会明确提示更新；新版 Broker 对旧 Agent 保留单手机通信兼容。
+
+专项验证：`node --test tests/cloudMultiPhone.test.mjs tests/cloudMultiPhone.integration.mjs tests/sessionHub.test.mjs tests/terminalHub.test.mjs`。多手机测试覆盖跨账号路由隔离、独立加密与配对、相同公钥的多连接、旧客户端无 `clientId`、重复 Agent、定向回复、审批去重、终端控制权及断线清理。进程测试启动临时 Broker、两个 Agent 和模拟手机，使用独立数据库、随机端口与模拟 Codex，不发送真实模型请求、不重启现有服务。
+
+免费账号专项：`node --test tests/freeAccounts.test.mjs tests/cloudMultiPhone.integration.mjs` 与 `node tests/freeAccess-web.integration.mjs`，验证旧数据库迁移、免费连接、管理员停用与恢复、失效令牌、无收费入口和停用提示。Expo 客户端已做 Android 导出检查，真机使用仍需加载新版客户端。
 
 ## 组成
 
@@ -32,10 +59,13 @@
 
 | type | 方向 | 字段 | 说明 |
 |---|---|---|---|
-| `auth` | →Broker | `token`, `role`(`agent`/`phone`), `pubkey` | 登录后用 session token 认证 + 公布本端公钥 |
-| `authed` | →端 | `peerOnline`, `peerPubkey` | 认证成功，告知对端是否在线及其公钥 |
-| `peer` | →端 | `online`, `pubkey` | 对端上/下线 + 公钥（用于密钥交换） |
-| `e2e` | 双向 | `nonce`, `box` | **加密信封**，Broker 原样转发给对端，读不懂 |
+| `auth` | →Broker | `token`, `role`(`agent`/`phone`), `pubkey`, `multiPhone` | 新 Agent 必须声明 `multiPhone: true`；手机无需新增字段 |
+| `agentChallenge` / `agentProof` | Broker ↔ Agent | `challenge` / `signature` | Agent 在 `auth` 中提供 `deviceKey` 后完成一次性签名挑战，证明持有设备私钥 |
+| `authed` | →端 | `peerOnline`, `peerPubkey` 或 `peers[]` | 手机仍收到 Agent 公钥；新 Agent 收到 `multiPhone: true` 与 `{phoneId, pubkey}` 列表 |
+| `peer` | →端 | `online`, `pubkey`, `phoneId` | 通知 Agent 时携带对应手机的 `phoneId`；通知手机时仅描述 Agent |
+| `e2e` | 双向 | `nonce`, `box`, `phoneId` | Agent 收发时携带 Broker 分配的连接标识；手机的发送身份由 Broker 写入，不能自行指定；回复只发送给同账号目标连接 |
+
+Agent 为每个连接分配独立的内部 `clientId`，与手机消息里的 `clientId` 绑定并在回复时转换，避免不同手机或共享设备密钥的网页标签串用会话。业务广播也由 Agent 针对每个已授权连接分别加密，Broker 不广播同一密文给全部手机。管理后台 `/api/admin/overview` 的在线项保留 `phone` 布尔字段，同时增加 `phoneCount`；Agent `/api/status` 增加 `onlinePhones` 和 `pairedPhones`。
 
 **信封解密后（手机 ↔ Agent，端到端）= 既有的 CodexApp 协议**（`prompt`/`approval`/`event`/`diff`/`hello`…，见 [../PROTOCOL.md](../PROTOCOL.md)）。也就是说云中转**完全复用**了原有协议，只是套了一层 E2E + 账号路由。
 
@@ -63,14 +93,11 @@ node cloud/testPhone.mjs you@example.com yourpassword "只用一个词回复我�
 
 ## 安全模型
 
-- **Broker 不可信**：所有 CodexApp 消息端到端加密，Broker 只是个加密管道。即使 Broker 被攻破，也读不到你的代码/命令/回复。
+- **消息保密性**：业务消息端到端加密，正常转发的 Broker 只处理密文。配对身份校验与网页发布来源的信任边界见下文，不能仅凭加密宣称服务器失陷后所有客户端仍然安全。
 - **审批闸门保留**：手机仍然要批准 Codex 的命令/文件改动——远程能力可控。
-- **密钥**：Agent 的设备密钥存 `cloud/agent.keys.json`（已 gitignore），不出本机。
+- **密钥**：Agent 的设备密钥保存在配置目录的 `agent.keys.json`，配对记录在 `agent.pairing.json`；Windows 默认配置目录为 `%APPDATA%/CodexApp`，可用 `CODEXAPP_DIR` 指定。
 
-> ✅ **MITM 已封堵（配对码）**：手机和 Agent 通过 Broker 交换公钥，但首次连接必须完成
-> **配对码握手**——Agent 显示一个配对码，用户在手机上输入；该码经 `sas()` 绑进**双方公钥**
-> 的短认证串。恶意 Broker 若调包公钥，SAS 不匹配 → 配对被拒。配对成功后 Agent **pin** 手机公钥，
-> 后续免码。**未配对的手机拿不到任何数据、也无法让 Codex 执行命令。**（正/负用例已测。）
+> **配对码模式**：首次连接必须完成配对码握手，`sas()` 将配对码与双方公钥绑定；成功后 Agent 固定手机公钥。上述配对检查仅适用于 `pairingMode: "code"`，默认免码模式依赖 Broker 的账号认证，不能套用同样的身份校验保证。网页代码由 Broker 托管，端到端加密也不替代对网页发布来源的信任。
 
 ## 离生产还差什么
 
@@ -92,11 +119,11 @@ node cloud/testPhone.mjs you@example.com yourpassword "只用一个词回复我�
    - **网页**：`web/` 现支持「云账号」模式（邮箱注册/登录 + E2E + 配对），且 **Broker 直接托管网页**
      （用户访问 `https://<broker>/` 登录即用，同源）。多设备可同时配对（Agent pin 多个公钥）。
    - **iOS/Android**：`mobile/`（Expo）同样支持云账号模式。
-   **仍待**：APNs 推送、App 内购买(IAP)、上架。
+   **仍待**：APNs 推送、上架。
 6. ✅ **传输安全**：Broker 已支持 **wss/https**（`TLS_CERT`/`TLS_KEY`，无证书回落 http/ws）；
    部署见 [DEPLOY.md](DEPLOY.md)（Caddy 自动 TLS / 原生 TLS / systemd）。**仍待**：速率限制、滥用防护。
-7. **多设备**：当前一账号一 Agent 一手机。多手机/多电脑需扩展路由与多方密钥。
-8. **可观测**：日志、监控、连接数扩展（每用户 2 条常连）。
+7. **多设备**：已支持不同账号各一台 Agent，以及同账号多个手机同时连接；同账号多电脑选择和跨账号授权暂不支持。
+8. **可观测**：已有连接计数与 WebSocket 心跳；仍需按实际规模补充监控和容量规划（每账号一条 Agent 连接，加上每个手机客户端的连接）。
 
 把 v1 内核（本目录）跑通后，上面这些是工程化与产品化，不再有"能不能实现"的不确定性。
 

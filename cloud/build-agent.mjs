@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { signWindows, findSigntool } from "./sign-win.mjs";
 import { copyTerminalRuntime } from "../scripts/copy-terminal-runtime.mjs";
+import { copyWebRuntime } from "../scripts/copy-web-runtime.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(ROOT, "dist");
@@ -30,6 +31,7 @@ const EXE = path.join(DIST, isWin ? "CodexApp-Agent.exe" : "CodexApp-Agent");
 
 fs.mkdirSync(DIST, { recursive: true });
 copyTerminalRuntime(DIST);
+copyWebRuntime(DIST);
 
 console.log(`[build] target: ${process.platform}/${process.arch} -> ${path.basename(EXE)}`);
 console.log("[build] bundling with esbuild...");

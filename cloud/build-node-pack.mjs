@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { copyTerminalRuntime } from "../scripts/copy-terminal-runtime.mjs";
+import { copyWebRuntime } from "../scripts/copy-web-runtime.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(ROOT, "dist");
@@ -22,6 +23,7 @@ const ZIP = path.join(DIST, "CodexApp-node-win64.zip");
 fs.rmSync(PACK, { recursive: true, force: true });
 fs.mkdirSync(PACK, { recursive: true });
 copyTerminalRuntime(PACK);
+copyWebRuntime(PACK);
 
 // 1. bundle the agent into one CJS file
 console.log("[node-pack] bundling agent.cjs ...");

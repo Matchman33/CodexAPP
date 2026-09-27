@@ -8,7 +8,6 @@ import ApprovalCard from "./ApprovalCard";
 import SettingsModal from "./SettingsModal";
 import SessionsModal from "./SessionsModal";
 import DiffModal from "./DiffModal";
-import MembershipScreen from "./MembershipScreen";
 import WriterConflictModal from "./WriterConflictModal";
 import { ensureNotifPermission } from "./useRelay";
 import Feather from "@expo/vector-icons/Feather";
@@ -63,7 +62,6 @@ export default function MainScreen({ relay, onForget }) {
   const [showSettings, setShowSettings] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
-  const [showRedeem, setShowRedeem] = useState(false);
   const pendingText = useRef(null);
   useEffect(() => {
     const pending = pendingText.current;
@@ -79,6 +77,7 @@ export default function MainScreen({ relay, onForget }) {
   const running = relayState.status === "running";
 
   const connLabel =
+    conn === "disabled" ? "账号已停用" :
     conn === "unauthorized" ? "账号/密码无效" :
     conn === "needCode" ? "需要配对码" :
     conn === "pairFailed" ? "配对失败" :
@@ -195,16 +194,12 @@ export default function MainScreen({ relay, onForget }) {
           config={{ ...config, cwd: config.cwd || relayState.cwd }}
           models={relay.models}
           onRefreshModels={actions.listModels}
-          cloud={cloud}
-          membershipUntil={relay.membershipUntil}
-          onRedeem={() => { setShowSettings(false); setShowRedeem(true); }}
           onApply={async (cfg) => { await actions.applyConfig(cfg); setShowSettings(false); }}
           onNewThread={async (cfg) => { await actions.applyConfig(cfg); actions.newThread(cfg.cwd); setShowSettings(false); }}
           onEnableNotif={enableNotif}
           onForget={forget}
           onClose={() => setShowSettings(false)}
         />
-        {showRedeem && <MembershipScreen relay={relay} onClose={() => setShowRedeem(false)} />}
 
         <SessionsModal
           visible={showSessions}

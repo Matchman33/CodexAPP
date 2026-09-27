@@ -28,6 +28,44 @@ function fixture(t) {
   return { hub, calls, messages, dir };
 }
 
+test("多个客户端同会话刷新合并 RPC，窗口内复用缓存并保持独立请求标识", async t => {
+  const { hub, calls, messages } = fixture(t);
+  await hub.dispatch({ type: "readThread", threadId: "one" }, "a");
+  await hub.dispatch({ type: "readThread", threadId: "one" }, "b");
+  calls.length = 0; messages.length = 0;
+  await Promise.all([
+    hub.dispatch({ type: "watchThread", threadId: "one", requestId: "a-watch" }, "a"),
+    hub.dispatch({ type: "watchThread", threadId: "one", requestId: "b-watch" }, "b"),
+  ]);
+  const count = calls.length;
+  assert.equal(calls.filter(c => c.method === "thread/read").length, 1);
+  assert.equal(messages.find(m => m.requestId === "a-watch").clientId, "a");
+  assert.equal(messages.find(m => m.requestId === "b-watch").clientId, "b");
+  await hub.dispatch({ type: "watchThread", threadId: "one", requestId: "cached" }, "b");
+  assert.equal(calls.length, count);
+  const later = Date.now() + 2100;
+  t.mock.method(Date, "now", () => later);
+  await hub.dispatch({ type: "watchThread", threadId: "one" }, "a");
+  assert(calls.length > count);
+});
+
+test("历史合并请求失败可重试，发送接续后迟到的历史不能覆盖当前状态", async t => {
+  const { hub, messages } = fixture(t);
+  await hub.dispatch({ type: "readThread", threadId: "one" }, "a");
+  const bridge = hub.sessions.get("one"), open = bridge.historyPager.open.bind(bridge.historyPager);
+  bridge.historyPager.open = async () => { throw new Error("fixture failure"); };
+  await assert.rejects(hub.dispatch({ type: "watchThread", threadId: "one" }, "a"), /fixture failure/);
+  let release, started;
+  const entered = new Promise(resolve => { started = resolve; });
+  bridge.historyPager.open = async id => { started(); await new Promise(resolve => { release = resolve; }); return open(id); };
+  const watching = hub.dispatch({ type: "watchThread", threadId: "one", requestId: "late" }, "a");
+  await entered;
+  await hub.dispatch({ type: "prompt", text: "running", threadId: "one" }, "b");
+  release(); await watching;
+  assert(messages.some(m => m.requestId === "late" && m.skipped));
+  assert.equal(bridge.state.status, "running");
+});
+
 test("切换只读历史不检查占用，两个会话可以同时执行且通知不串话", async t => {
   const { hub, calls, messages } = fixture(t);
   await hub.dispatch({ type: "readThread", threadId: "one", historyMode: "paged", checkWriter: true }, "phone");

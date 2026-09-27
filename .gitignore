@@ -4,6 +4,7 @@ codexapp.config.json
 # Cloud agent/broker secrets (credentials, device keys, account store, certs)
 cloud/agent.config.json
 cloud/agent.keys.json
+cloud/agent.identity.json
 cloud/agent.pairing.json
 cloud/pairing-code.txt
 cloud/accounts.json
@@ -37,6 +38,7 @@ web/vendor/terminal.js
 web/vendor/terminal.css
 web/vendor/preview-highlight-worker.js
 desktop/terminalPtyWorker.cjs
+desktop/web/
 
 # frp 本地配置、部署密钥、客户端包与证书
 deploy/frp/runtime/

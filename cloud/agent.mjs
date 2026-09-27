@@ -6,8 +6,7 @@
 // and bridges the broker <-> local `codex app-server`. All phone/web traffic is
 // end-to-end encrypted; the broker only relays ciphertext.
 //
-// SECURITY: a client must complete a PAIRING-CODE handshake (SAS over both public
-// keys) before the agent sends any data or runs any command; paired keys are pinned.
+// 配对码模式先校验绑定双方公钥的 SAS；免码模式依赖同账号认证。
 //
 // Run:  node cloud/agent.mjs        (or the packaged CodexApp-Agent.exe)
 import fs from "node:fs";
@@ -15,13 +14,14 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
 import { WebSocket } from "ws";
-import { SessionHub } from "../core/sessionHub.mjs";
-import { enableServiceRestart, hostRestart } from "../core/serviceRestart.mjs";
-import { persistModel } from "../core/modelSettings.mjs";
+import { SharedAgentHub } from "../core/sharedAgentHub.mjs";
 import { createSleepPrevention } from "../core/sleepPrevention.mjs";
-import { loadOrCreateKeyPair, seal, open, fingerprint, sas } from "./e2e.mjs";
+import { loadOrCreateKeyPair, fingerprint } from "./e2e.mjs";
+import { AgentPhones } from "./agentPhones.mjs";
+import { loadDeviceIdentity, signDeviceChallenge } from "./deviceIdentity.mjs";
 
 function appDir() {
   // Per-user, writable, stable config dir — independent of where the binary/script
@@ -91,15 +91,18 @@ function savePairing() { fs.writeFileSync(PAIRING_FILE, JSON.stringify(pairing, 
 const config = loadConfig();
 const sleepPrevention = createSleepPrevention(config);
 const keys = loadOrCreateKeyPair(KEYS_FILE);
+const deviceIdentity = loadDeviceIdentity(path.join(BASE, "agent.identity.json"));
 const pairing = loadPairing();
 fs.writeFileSync(PAIRING_TXT, pairing.code + "\n");
 
 // ---- live status (read by the control panel) ----
 const status = {
-  phase: "needLogin", // needLogin|startingCodex|loggingIn|connecting|waitingPeer|pairing|paired|membership|error
+  phase: "needLogin", // needLogin|startingCodex|loggingIn|connecting|waitingPeer|pairing|paired|error
   brokerConnected: false,
   codexConnected: false,
   peerOnline: false,
+  onlinePhones: 0,
+  pairedPhones: 0,
   paired: false,
   pairingCode: pairing.code,
   pairingMode: config.pairingMode,
@@ -112,60 +115,41 @@ const status = {
 function setStatus(p) { Object.assign(status, p); }
 
 let ws = null;
-let phonePubkey = null;
-let trusted = false;
+let phones;
 let backoff = 1000;
-let membershipWait = false; // true after a membership_required rejection (slow retry)
 let running = false;        // user has logged in / wants to be connected
-let authToken = null;       // cached JWT — reuse across WS reconnects (avoid re-login storms)
+let authToken = config.sessionToken || null;
+let retryTimer = null, startGeneration = 0, startingGeneration = null;
+function retryAgent(delay) {
+  clearTimeout(retryTimer);
+  const generation = startGeneration;
+  retryTimer = setTimeout(() => { if (running && generation === startGeneration) void startAgent(); }, delay);
+}
 
-const bridge = new SessionHub(config, (msg) => {
+const SOURCE_ROOT = typeof __dirname === "string" ? path.dirname(__dirname) : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const bridge = new SharedAgentHub({ config, base: BASE, root: SOURCE_ROOT,
+  webDir: typeof __dirname === "string" ? path.join(__dirname, "web") : undefined,
+  sleepStatus: () => sleepPrevention.status(), emit: (msg) => {
   status.codexConnected = !!bridge.state.codexConnected;
-  // CodexApp data only flows to a PAIRED phone.
-  if (!trusted || !phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "e2e", ...seal(msg, phonePubkey, keys.secretKey) }));
-}, (model, settings) => persistModel(CONFIG_FILE, model, settings), { dataDir: process.env.CODEXAPP_DATA_DIR || path.join(path.dirname(CONFIG_FILE), "sessions") });
-enableServiceRestart(bridge, hostRestart(() => bridge.stop()));
+  phones?.broadcast(msg);
+} });
+process.on("message", async message => {
+  if (message?.type !== "codexapp-stop" || process.env.CODEXAPP_MANAGED !== "1") return;
+  try { await bridge.stop(); process.exit(0); } catch (error) { console.error(error.message); }
+});
 let queuesRestored = false;
 
-function sendCtrl(obj) {
-  if (!phonePubkey || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "e2e", ...seal(obj, phonePubkey, keys.secretKey) }));
-}
-function sendSnapshot() { if (trusted) sendCtrl(bridge.snapshot()); }
-
-function onPhoneOnline(pubkey) {
-  phonePubkey = pubkey;
-  status.peerOnline = true;
-  // "open" mode: trust any client on this account (broker already gates by account) — no code.
-  if (config.pairingMode === "open" || (pubkey && pairing.pinnedPhones.includes(pubkey))) {
-    trusted = true;
-    setStatus({ phase: "paired", paired: true });
-    console.log("[agent] phone trusted (" + (config.pairingMode === "open" ? "open mode" : "pinned") + ") " + fingerprint(pubkey));
-    sendSnapshot();
-  } else {
-    trusted = false;
-    setStatus({ phase: "pairing", paired: false });
-    console.log("[agent] phone needs pairing " + fingerprint(pubkey) + "  code=" + pairing.code);
-    sendCtrl({ type: "needPairing" });
-  }
-}
-
-function handlePair(inner) {
-  const expected = sas(pairing.code, keys.publicKey, phonePubkey);
-  if (inner.tag && inner.tag === expected) {
-    if (!pairing.pinnedPhones.includes(phonePubkey)) pairing.pinnedPhones.push(phonePubkey);
-    savePairing();
-    trusted = true;
-    setStatus({ phase: "paired", paired: true, pinnedCount: pairing.pinnedPhones.length });
-    console.log("[agent] PAIRED ✓ phone " + fingerprint(phonePubkey));
-    sendCtrl({ type: "paired", ok: true });
-    sendSnapshot();
-  } else {
-    console.warn("[agent] pairing REJECTED (code mismatch or MITM)");
-    sendCtrl({ type: "paired", ok: false, reason: "配对码不匹配或存在中间人" });
-  }
-}
+phones = new AgentPhones({
+  hub: bridge, keys, pairing, pairingMode: () => config.pairingMode, savePairing,
+  send: message => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); },
+  changed: () => {
+    const onlinePhones = phones.peers.size;
+    const pairedPhones = [...phones.peers.values()].filter(peer => peer.trusted).length;
+    setStatus({ onlinePhones, pairedPhones, peerOnline: onlinePhones > 0, paired: pairedPhones > 0,
+      pinnedCount: pairing.pinnedPhones.length,
+      ...(status.brokerConnected ? { phase: pairedPhones ? "paired" : onlinePhones ? "pairing" : "waitingPeer" } : {}) });
+  },
+});
 
 async function login() {
   const res = await fetch(CLOUD_BROKER + "/api/login", {
@@ -177,80 +161,112 @@ async function login() {
 }
 
 function connect(token) {
-  ws = new WebSocket(CLOUD_BROKER.replace(/^http/, "ws") + "/link");
-  ws.on("open", () => { backoff = 1000; ws.send(JSON.stringify({ type: "auth", token, role: "agent", pubkey: keys.publicKey })); });
-  ws.on("message", (raw) => {
+  const previous = ws;
+  ws = null;
+  previous?.close();
+  setStatus({ brokerConnected: false });
+  phones.clear();
+  const socket = ws = new WebSocket(CLOUD_BROKER.replace(/^http/, "ws") + "/link");
+  socket.on("open", () => {
+    if (ws !== socket || !running) { socket.close(); return; }
+    backoff = 1000;
+    socket.send(JSON.stringify({ type: "auth", token, role: "agent", pubkey: keys.publicKey, multiPhone: true, deviceKey: deviceIdentity.publicKey }));
+  });
+  socket.on("message", (raw) => {
+    if (ws !== socket || !running || socket.readyState !== WebSocket.OPEN) return;
     let m; try { m = JSON.parse(raw.toString()); } catch { return; }
+    if (!m || typeof m !== "object") return;
+    if (m.type === "agentChallenge") {
+      try { socket.send(JSON.stringify({ type: "agentProof", signature: signDeviceChallenge(deviceIdentity, m.challenge) })); }
+      catch (error) { setStatus({ error: error.message }); socket.close(); }
+      return;
+    }
     if (m.type === "authed") {
+      if (!m.multiPhone || m.deviceIdentity !== true) {
+        running = false;
+        setStatus({ phase: "error", error: "请先更新云端 Broker，启用多客户端和设备身份认证" });
+        socket.close(); return;
+      }
       setStatus({ phase: m.peerOnline ? "connecting" : "waitingPeer", brokerConnected: true, error: "" });
       console.log("[agent] linked. peerOnline=" + m.peerOnline);
-      if (m.peerOnline && m.peerPubkey) onPhoneOnline(m.peerPubkey);
+      for (const peer of m.peers || []) phones.online(peer.phoneId, peer.pubkey).catch(error => setStatus({ error: error.message }));
       return;
     }
     if (m.type === "peer") {
-      if (m.online) onPhoneOnline(m.pubkey);
-      else { for (const id of bridge.terminals.records.values()) for (const clientId of [...id.viewers.keys()]) bridge.terminals.detach(clientId); phonePubkey = null; trusted = false; setStatus({ phase: "waitingPeer", peerOnline: false, paired: false }); console.log("[agent] phone offline"); }
+      if (m.online) phones.online(m.phoneId, m.pubkey).catch(error => setStatus({ error: error.message }));
+      else phones.offline(m.phoneId);
       return;
     }
     if (m.type === "e2e") {
-      const inner = open(m, phonePubkey, keys.secretKey);
-      if (!inner) { console.error("[agent] decrypt failed"); return; }
-      if (!trusted) {
-        if (inner.type === "pair") handlePair(inner);
-        else sendCtrl({ type: "needPairing" }); // ignore commands until paired
-        return;
-      }
-      bridge.dispatch(inner).catch((e) => sendCtrl({ type: "error", message: e.message, requestId: inner.requestId, clientId: inner.clientId, threadId: inner.threadId, terminalId: inner.terminalId }));
+      phones.receive(m).catch(e => console.error("[agent] client message failed:", e.message));
       return;
     }
     if (m.type === "error") {
-      if (m.code === "membership_required") {
-        membershipWait = true;
-        setStatus({ phase: "membership", error: "云端会员未开通或已过期" });
-        console.error("[agent] 云端会员未开通或已过期。请在客户端用兑换码开通后会自动连上;局域网模式不受影响。");
+      if (["agent_already_online", "agent_upgrade_required", "agent_replaced"].includes(m.code)) {
+        running = false;
+        clearTimeout(retryTimer);
+        setStatus({ phase: "error", error: m.message });
+      } else if (["session_revoked", "account_disabled"].includes(m.code)) {
+        running = false; authToken = null; startGeneration++; clearTimeout(retryTimer);
+        config.sessionToken = null; config.loginRequired = true; saveConfig();
+        setStatus({ phase: "needLogin", error: m.code === "account_disabled" ? "账号已被管理员停用，请联系管理员" : "登录已失效，请在电脑面板重新登录" });
       } else if (/token|invalid|auth/i.test(m.message || "")) {
         authToken = null; // token rejected -> re-login on the next reconnect
         setStatus({ error: "登录已失效，正在重新登录…" });
       } else { setStatus({ error: m.message || "broker error" }); console.error("[agent] broker error:", m.message); }
     }
   });
-  ws.on("close", () => {
-    for (const terminal of bridge.terminals.records.values()) for (const clientId of [...terminal.viewers.keys()]) bridge.terminals.detach(clientId);
-    phonePubkey = null; trusted = false;
+  socket.on("close", () => {
+    if (ws !== socket) return;
+    setStatus({ brokerConnected: false });
+    phones.clear();
     setStatus({ brokerConnected: false, peerOnline: false, paired: false });
-    if (!running) { setStatus({ phase: "needLogin" }); return; }
-    if (status.phase !== "membership") setStatus({ phase: "connecting" });
-    const delay = membershipWait ? 60000 : backoff;
-    membershipWait = false;
-    setTimeout(startAgent, delay);
+    if (!running) { if (status.phase !== "error") setStatus({ phase: "needLogin" }); return; }
+    setStatus({ phase: "connecting" });
+    retryAgent(backoff);
     backoff = Math.min(backoff * 1.6, 15000);
   });
-  ws.on("error", () => { try { ws.close(); } catch {} });
+  socket.on("error", () => { try { socket.close(); } catch {} });
 }
 
 async function startAgent() {
+  if (!running || startingGeneration === startGeneration) return;
   if (!config.email || !config.password) { running = false; setStatus({ phase: "needLogin" }); return; }
-  running = true;
+  clearTimeout(retryTimer);
+  const generation = startGeneration;
+  startingGeneration = generation;
   try {
-    if (!authToken) { setStatus({ phase: "loggingIn", email: config.email, error: "" }); authToken = await login(); } // reuse token across reconnects
+    if (!authToken) {
+      setStatus({ phase: "loggingIn", email: config.email, error: "" });
+      const token = await login(); if (generation !== startGeneration || !running) return;
+      authToken = token; config.sessionToken = token; saveConfig();
+    }
     setStatus({ phase: "startingCodex" });
     if (!bridge.state.codexConnected) await bridge.start();
+    if (generation !== startGeneration || !running) return;
     if (!queuesRestored) { bridge.restoreQueues(); queuesRestored = true; }
     status.codexConnected = !!bridge.state.codexConnected;
     setStatus({ phase: "connecting" });
     connect(authToken);
   } catch (e) {
+    if (generation !== startGeneration || !running) return;
     const msg = String(e.message || e);
     console.error("[agent] start failed:", msg);
     // Auth problems won't fix themselves: drop back to the login form with a reason
     // (and don't retry — this is what caused the 401→retry→429 rate-limit loop).
     if (/login failed: 401/.test(msg)) { authToken = null; running = false; setStatus({ phase: "needLogin", error: "邮箱或密码错误，请重新登录" }); return; }
+    if (msg.includes("account_disabled")) {
+      authToken = null; running = false; config.sessionToken = null; config.loginRequired = true; saveConfig();
+      setStatus({ phase: "needLogin", error: "账号已被管理员停用，请联系管理员" }); return;
+    }
     if (/login failed: 403/.test(msg)) { authToken = null; running = false; setStatus({ phase: "needLogin", error: "邮箱未验证：请先点验证邮件里的链接，再登录" }); return; }
     // On 429 back off long enough for the broker's 15-min rate window to clear
     // (retrying too often just keeps it limited).
     const rate = /login failed: 429/.test(msg);
     setStatus({ phase: "error", error: rate ? "登录过于频繁，5 分钟后自动重试…" : ("连接失败：" + msg) });
-    if (running) setTimeout(startAgent, rate ? 300000 : 3000);
+    if (running) retryAgent(rate ? 300000 : 3000);
+  } finally {
+    if (startingGeneration === generation) startingGeneration = null;
   }
 }
 
@@ -309,10 +325,12 @@ function startPanel(port, tries = 0) {
         } catch (e) { return send(502, { error: "连不上 Broker：" + e.message }); }
       }
       if (req.method === "POST" && req.url === "/api/login") {
+        startGeneration++; clearTimeout(retryTimer);
         const b = await readJson(req);
         config.email = (b.email || "").trim();
         config.password = b.password || "";
         authToken = null; // new credentials -> fresh login
+        config.sessionToken = null; config.loginRequired = false;
         saveConfig();
         setStatus({ email: config.email, error: "" });
         running = true;
@@ -321,7 +339,9 @@ function startPanel(port, tries = 0) {
         return send(200, { ok: true });
       }
       if (req.method === "POST" && req.url === "/api/logout") {
-        running = false; authToken = null; config.email = ""; config.password = ""; saveConfig();
+        startGeneration++; clearTimeout(retryTimer);
+        running = false; authToken = null; config.email = ""; config.password = ""; config.sessionToken = null; config.loginRequired = false; saveConfig();
+        phones.clear();
         try { ws && ws.close(); } catch {}
         setStatus({ phase: "needLogin", brokerConnected: false, peerOnline: false, paired: false, email: "" });
         return send(200, { ok: true });
@@ -482,8 +502,8 @@ $("setCode").onclick=function(){
    }).catch(function(e){$("codeMsg").textContent="出错："+e.message});
 };
 
-var LABEL={needLogin:"未登录",startingCodex:"正在启动本地 Codex…",loggingIn:"正在登录…",connecting:"连接中…",waitingPeer:"已连接，等待客户端…",pairing:"等待配对（请输入配对码）",paired:"已连接 ✓ 可远程控制",membership:"云端会员未开通/已过期",error:"出错"};
-var COLOR={paired:"var(--accent)",waitingPeer:"var(--accent2)",pairing:"var(--accent2)",membership:"var(--danger)",error:"var(--danger)"};
+var LABEL={needLogin:"未登录",startingCodex:"正在启动本地 Codex…",loggingIn:"正在登录…",connecting:"连接中…",waitingPeer:"已连接，等待客户端…",pairing:"等待配对（请输入配对码）",paired:"已连接 ✓ 可远程控制",error:"出错"};
+var COLOR={paired:"var(--accent)",waitingPeer:"var(--accent2)",pairing:"var(--accent2)",error:"var(--danger)"};
 function render(s){
   if(s.phase==="needLogin"){$("auth").className="";$("panel").className="hidden";
     if(s.email&&!$("email").value)$("email").value=s.email;
@@ -499,7 +519,7 @@ function render(s){
   $("pairBox").className=showPair?"":"hidden";$("code").textContent=s.pairingCode||"------";
   $("d_broker").className="dot"+(s.brokerConnected?" on":"");$("v_broker").textContent=s.brokerConnected?"已连接":"未连接";
   $("d_codex").className="dot"+(s.codexConnected?" on":"");$("v_codex").textContent=s.codexConnected?"已就绪":"未就绪";
-  $("d_peer").className="dot"+(s.peerOnline?" on":"");$("v_peer").textContent=s.peerOnline?(s.paired?"已配对":"待配对"):"离线";
+  $("d_peer").className="dot"+(s.peerOnline?" on":"");$("v_peer").textContent=s.peerOnline?(s.onlinePhones+" 个连接 / "+s.pairedPhones+" 个已授权"):"离线";
   $("v_email").textContent=s.email||"—";$("v_fp").textContent=s.fingerprint||"—";$("v_pin").textContent=(s.pinnedCount||0)+" 台";
   $("perr").textContent=s.error?("⚠ "+s.error):"";
 }
@@ -509,5 +529,5 @@ poll();setInterval(poll,1500);
 
 // ---- boot ----
 startPanel(config.panelPort);
-if (config.email && config.password) startAgent();
+if (config.email && config.password && !config.loginRequired) { running = true; startAgent(); }
 else setStatus({ phase: "needLogin" });

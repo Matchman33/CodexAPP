@@ -21,6 +21,7 @@ try {
   await fs.writeFile(externalFile, externalText);
   await fs.cp("core", path.join(root, "core"), { recursive: true }); await fs.mkdir(path.join(root, "relay"));
   await fs.copyFile("relay/server.mjs", path.join(root, "relay/server.mjs"));
+  await fs.copyFile("relay/transport.mjs", path.join(root, "relay/transport.mjs"));
   for (const name of ["web", "node_modules"]) await fs.symlink(path.resolve(name), path.join(root, name), process.platform === "win32" ? "junction" : "dir");
   await fs.mkdir(path.join(root, "exports")); await fs.writeFile(path.join(root, "exports/报表.xlsx"), workbook); await fs.writeFile(path.join(root, "exports/report.pdf"), pdf);
   for (const [name, content] of Object.entries(textFixtures)) await fs.writeFile(path.join(root, "exports", name), content);
@@ -156,6 +157,9 @@ try {
   await page.evaluate(() => { document.querySelector('[aria-label="下载文件：报表.xlsx"]').click(); disposeConnection(); });
   await page.locator(".file-feedback").filter({ hasText: "连接已断开" }).waitFor();
   await page.evaluate(() => resumeConnection()); await page.waitForFunction(() => sessionReady);
+  // 等待重连后的历史快照完成，固定旧附件引用后再验证文件变化。
+  await page.waitForFunction(() => !pageRequest && !pendingSelection && !watchRequest);
+  await page.evaluate(() => { watchAfter = Date.now() + 60000; });
   await fs.writeFile(path.join(root, "exports/报表.xlsx"), "changed during download");
   await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).click();
   await page.locator(".file-feedback").filter({ hasText: "变化" }).waitFor();

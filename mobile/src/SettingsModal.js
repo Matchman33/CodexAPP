@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Modal, View, Text, TextInput, Pressable, ScrollView, StyleSheet } from "react-native";
 import { C } from "./theme";
-import { fmtMember } from "./membership";
 
 const POLICIES = ["on-request", "untrusted", "on-failure", "never"];
 const SANDBOXES = ["workspace-write", "read-only", "danger-full-access"];
@@ -22,7 +21,7 @@ function Chips({ value, options, onPick }) {
   );
 }
 
-export default function SettingsModal({ visible, config, models, onRefreshModels, cloud, membershipUntil, onRedeem, onApply, onNewThread, onEnableNotif, onForget, onClose }) {
+export default function SettingsModal({ visible, config, models, onRefreshModels, onApply, onNewThread, onEnableNotif, onForget, onClose }) {
   const [cwd, setCwd] = useState("");
   const [policy, setPolicy] = useState("on-request");
   const [sandbox, setSandbox] = useState("workspace-write");
@@ -138,14 +137,6 @@ export default function SettingsModal({ visible, config, models, onRefreshModels
             <Pressable style={[s.btn, s.secondary, s.full]} onPress={onEnableNotif}>
               <Text style={s.btnText}>开启审批通知</Text>
             </Pressable>
-            {cloud && (
-              <>
-                <Text style={[s.label, { marginTop: 16 }]}>会员：{fmtMember(membershipUntil)}（局域网模式免费）</Text>
-                <Pressable style={[s.btn, s.secondary, s.full]} onPress={onRedeem}>
-                  <Text style={s.btnText}>兑换 / 续费会员</Text>
-                </Pressable>
-              </>
-            )}
             <Pressable style={[s.btn, s.ghost, s.full]} onPress={onForget}>
               <Text style={[s.btnText, { color: C.danger }]}>退出 / 忘记连接</Text>
             </Pressable>

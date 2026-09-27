@@ -27,6 +27,7 @@ export class SessionHub {
     this.metadata = fs.existsSync(this.metadataFile) ? JSON.parse(fs.readFileSync(this.metadataFile, "utf8")) : {};
     this.sessions = new Map(); this.selected = new Map(); this.clientQueues = new Map(); this.drafts = new Map();
     this.pagedClients = new Set();
+    this.historyWatches = new WeakMap();
     this.context = new AsyncLocalStorage(); this.creation = Promise.resolve();
     this.control = new CodexBridge({ ...config }, m => this.controlMessage(m));
     this.control.codex.onNotification = m => this.notification(m);
@@ -39,6 +40,7 @@ export class SessionHub {
   controlMessage(m) {
     if (m.type !== "state") return;
     for (const bridge of this.sessions.values()) {
+      this.historyWatches.delete(bridge);
       bridge.state.codexConnected = m.state.codexConnected;
       bridge.state.codexVersion = m.state.codexVersion;
       if (!m.state.codexConnected) {
@@ -55,7 +57,11 @@ export class SessionHub {
       delete this.metadata[id]; atomicJson(this.metadataFile, this.metadata); this.control.files.forget(id);
       this.emit({ type: "threadDeleted", threadId: id }); return;
     }
-    if (id) this.sessions.get(id)?.codex.onNotification(m);
+    if (id) {
+      const bridge = this.sessions.get(id);
+      if (bridge) this.historyWatches.delete(bridge);
+      bridge?.codex.onNotification(m);
+    }
     else if (m.method === "serverRequest/resolved") for (const b of this.sessions.values()) b.codex.onNotification(m);
   }
   serverRequest(m) {
@@ -171,6 +177,22 @@ export class SessionHub {
     if (candidate) this.sessions.delete(candidate[0]);
     else throw new Error("已打开会话过多，请先关闭不使用的会话");
   }
+  async watchPage(id, bridge) {
+    let cached = this.historyWatches.get(bridge);
+    if (!cached || (!cached.pending && cached.expires <= Date.now())) {
+      cached = { expires: 0 };
+      this.historyWatches.set(bridge, cached);
+      cached.pending = bridge.historyPager.open(id).then(page => {
+        cached.page = page; cached.expires = Date.now() + 2000; return page;
+      }).catch(error => {
+        if (this.historyWatches.get(bridge) === cached) this.historyWatches.delete(bridge);
+        throw error;
+      }).finally(() => { cached.pending = null; });
+    }
+    const page = cached.pending ? await cached.pending : cached.page;
+    if (this.historyWatches.get(bridge) !== cached || this.sessions.get(id) !== bridge || !bridge.state.readOnly) return null;
+    return { page, syncedAt: cached.expires - 2000 };
+  }
   async command(m, clientId) {
     const reply = msg => this.emit({ ...msg, clientId });
     if (m.type.startsWith("terminal")) {
@@ -252,16 +274,19 @@ export class SessionHub {
     if (!this.selected.get(clientId)) this.selected.set(clientId, id);
     if (m.type === "watchThread") {
       if (!b.state.readOnly) return reply({ type: "historyUpdate", threadId: id, requestId: m.requestId, skipped: true });
-      const page = await b.historyPager.open(id);
-      // A send may acquire this thread while the read is in flight.
-      if (!b.state.readOnly) return reply({ type: "historyUpdate", threadId: id, requestId: m.requestId, skipped: true });
+      const result = await this.watchPage(id, b);
+      if (!result) return reply({ type: "historyUpdate", threadId: id, requestId: m.requestId, skipped: true });
+      const { page, syncedAt } = result;
       b.eventLog = page.events; b.history = { paged: true, nextCursor: page.nextCursor };
-      return reply(b.files.decorate({ type: "historyUpdate", ...page, requestId: m.requestId, syncedAt: Date.now() }, b.state));
+      return reply(b.files.decorate({ type: "historyUpdate", ...page, requestId: m.requestId, syncedAt }, b.state));
     }
     if (m.type === "enqueuePrompt") {
       const items = [...this.sessions.values()].flatMap(s => [...s.promptQueue.threads.values()].flatMap(q => q.items));
       if (!b.promptQueue.receipts.has(m.requestId) && (items.length >= QUEUE_LIMITS.items || items.reduce((n, i) => n + i.text.length, 0) + String(m.text || "").length > QUEUE_LIMITS.totalChars || JSON.stringify(items.map(i => i.images || [])).length + JSON.stringify(m.images || []).length > IMAGE_LIMITS.queueChars)) throw new Error("待执行队列已满");
     }
-    await b.dispatch({ ...m, threadId: id, checkWriter: false });
+    const readOnly = ["historyPage", "readHistoryItem", "readAttachment", "listModels"].includes(m.type);
+    if (!readOnly) this.historyWatches.delete(b);
+    try { await b.dispatch({ ...m, threadId: id, checkWriter: false }); }
+    finally { if (!readOnly) this.historyWatches.delete(b); }
   }
 }

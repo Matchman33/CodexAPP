@@ -83,21 +83,6 @@
     </div>
   </section>
 
-  <!-- Membership gate (cloud only; LAN is free) -->
-  <section id="membership" class="setup hidden">
-    <div class="setup-card">
-      <h1>开通云端会员</h1>
-      <p class="muted">局域网直连模式永久免费；云端（随处可用）需要会员。</p>
-      <p id="mStatus" class="muted small"></p>
-      <label>兑换码</label>
-      <input id="mCode" type="text" placeholder="CDX-XXXX-XXXX-XXXX" autocapitalize="characters" autocorrect="off" />
-      <button id="mRedeem" class="btn primary big">兑换并开通</button>
-      <p id="mMsg" class="muted small"></p>
-      <button id="mLan" class="btn secondary full">改用局域网模式（免费）</button>
-      <button id="mClose" class="btn ghost full">返回</button>
-    </div>
-  </section>
-
   <!-- Main app -->
   <div id="app" class="app hidden">
     <header class="topbar">
@@ -208,8 +193,6 @@
       <button id="cancelRestartBtn" class="btn secondary full hidden"><i data-lucide="x"></i>取消计划重启</button>
       <p id="threadActionStatus" class="small muted" role="status"></p>
       <button id="enableNotif" class="btn secondary full">开启审批通知</button>
-      <p id="memberStatus" class="muted small"></p>
-      <button id="redeemBtn" class="btn secondary full hidden">兑换 / 续费会员</button>
       <button id="forget" class="btn ghost full">退出/忘记连接</button>
     </div>
   </div>

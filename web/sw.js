@@ -1,5 +1,5 @@
 // 仅缓存应用外壳，不缓存账号接口、健康检查或聊天数据。
-const CACHE = "codexapp-v34-inline-file-preview";
+const CACHE = "codexapp-v35-free-cloud-accounts";
 const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./terminal.js", "./history-feed.js", "./image-attachments.js", "./file-downloads.js", "./e2e.js", "./vendor/nacl.js", "./vendor/chat-ui.js", "./vendor/terminal.js", "./vendor/terminal.css", "./vendor/preview-highlight-worker.js", "./manifest.webmanifest", "./icon-180.png", "./icon-512.png"];
 const shellPaths = new Set(SHELL.map((p) => new URL(p, self.location).pathname));
 self.addEventListener("install", (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));

@@ -40,7 +40,6 @@ export function useRelay(profile, keypair) {
   const [agentFp, setAgentFp] = useState(null);
   const [paired, setPaired] = useState(false);
   const [pairError, setPairError] = useState("");
-  const [membershipUntil, setMembershipUntil] = useState(0);
 
   const wsRef = useRef(null);
   const configRequests = useRef(new Map());
@@ -51,8 +50,7 @@ export function useRelay(profile, keypair) {
   const timerRef = useRef(null);
   const aliveRef = useRef(true);
   const agentPubRef = useRef(null);
-  const authTokenRef = useRef(null);   // JWT from /api/login (used for /api/redeem)
-  const membershipRef = useRef(false); // true after a membership_required block (no auto-reconnect)
+  const authBlockedRef = useRef(false);
 
   const notifyApproval = useCallback((a) => {
     try { Vibration.vibrate(Platform.OS === "android" ? [0, 80, 40, 80] : [80, 40, 80]); } catch {}
@@ -137,14 +135,14 @@ export function useRelay(profile, keypair) {
   }, [notifyApproval, pushEvents]);
 
   const scheduleReconnect = useCallback((connectFn) => {
-    if (!aliveRef.current) return;
+    if (!aliveRef.current || authBlockedRef.current) return;
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => { if (aliveRef.current) connectFn(); }, backoffRef.current);
     backoffRef.current = Math.min(backoffRef.current * 1.6, 15000);
   }, []);
 
   const connect = useCallback(async () => {
-    if (!profile) return;
+    if (!profile || authBlockedRef.current) return;
     setConn("connecting");
     agentPubRef.current = null; setAgentFp(null);
     let ws;
@@ -154,14 +152,15 @@ export function useRelay(profile, keypair) {
           method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ email: profile.email, password: profile.password }),
         });
-        if (res.status === 401) { setConn("unauthorized"); return; }
+        if (res.status === 401) { authBlockedRef.current = true; setConn("unauthorized"); return; }
+        if (res.status === 403) {
+          const reason = await res.json().catch(() => ({}));
+          authBlockedRef.current = true;
+          setConn(reason.code === "account_disabled" ? "disabled" : "unauthorized"); return;
+        }
         if (!res.ok) { scheduleReconnect(connect); return; }
         const data = await res.json();
         const token = data.token;
-        authTokenRef.current = token;
-        setMembershipUntil(data.membershipUntil || 0);
-        // Not a member → show the redeem screen instead of (uselessly) hitting the gate.
-        if ((data.membershipUntil || 0) <= Date.now()) { membershipRef.current = true; setConn("needMembership"); return; }
         ws = new WebSocket(stripSlash(profile.brokerUrl).replace(/^http/, "ws") + "/link");
         ws.onopen = () => { backoffRef.current = 1000; ws.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keypair.publicKey })); };
       } else {
@@ -172,6 +171,7 @@ export function useRelay(profile, keypair) {
 
     wsRef.current = ws;
     ws.onmessage = (ev) => {
+      if (authBlockedRef.current || !aliveRef.current) return;
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (cloud) {
         if (m.type === "authed") { setConn("open"); if (m.peerOnline && m.peerPubkey) { agentPubRef.current = m.peerPubkey; setAgentFp(fingerprint(m.peerPubkey)); } return; }
@@ -191,8 +191,11 @@ export function useRelay(profile, keypair) {
           return;
         }
         if (m.type === "error") {
-          if (m.code === "membership_required") { membershipRef.current = true; setConn("needMembership"); try { ws.close(); } catch {} return; }
-          if (/token/i.test(m.message || "")) setConn("unauthorized");
+          if (m.code === "account_disabled" || m.code === "session_revoked" || /token/i.test(m.message || "")) {
+            authBlockedRef.current = true; setPaired(false); setRelayState(s => ({ ...s, codexConnected: false }));
+            setConn(m.code === "account_disabled" ? "disabled" : "unauthorized");
+            try { ws.close(); } catch {} return;
+          }
           return;
         }
         return;
@@ -207,8 +210,8 @@ export function useRelay(profile, keypair) {
       setModels((m) => ({ ...m, loading: false }));
       for (const p of configRequests.current.values()) { clearTimeout(p.timer); p.reject(new Error("连接已断开，请重连后检查设置")); }
       configRequests.current.clear();
-      if (membershipRef.current) return; // blocked: wait for redeem, don't reconnect
-      if (e && e.code === 4001) { setConn("unauthorized"); return; }
+      if (authBlockedRef.current) return;
+      if (e && e.code === 4001) { authBlockedRef.current = true; setConn("unauthorized"); return; }
       setConn("closed"); scheduleReconnect(connect);
     };
     ws.onerror = () => { try { ws.close(); } catch {} };
@@ -219,7 +222,7 @@ export function useRelay(profile, keypair) {
     setEvents([]); setApprovals([]); setRelayState({}); setDiff(""); setTree({ projects: [], projectless: [] }); setPaired(false); setPairError("");
     setModels({ models: [], defaultModel: null, loading: false, error: "" });
     setWriterConflict(null); setWriterBusy(false); setWriterError("");
-    membershipRef.current = false;
+    authBlockedRef.current = false;
     connect();
     return () => {
       aliveRef.current = false;
@@ -254,24 +257,6 @@ export function useRelay(profile, keypair) {
       writerRequest.current = null; setWriterBusy(false); setWriterError("操作确认超时，请重新检查占用状态");
     }, 30000);
   };
-
-  // Redeem a membership code via the broker (auth = the JWT from login). On
-  // success, reconnect if we were blocked; otherwise just refresh status.
-  const redeem = useCallback(async (code) => {
-    if (!cloud) return { ok: false, error: "仅云端模式需要会员" };
-    if (!authTokenRef.current) return { ok: false, error: "请先登录" };
-    try {
-      const res = await fetch(stripSlash(profile.brokerUrl) + "/api/redeem", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: authTokenRef.current, code }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) return { ok: false, error: j.error || ("HTTP " + res.status) };
-      setMembershipUntil(j.membershipUntil || 0);
-      if (membershipRef.current) { membershipRef.current = false; backoffRef.current = 1000; connect(); }
-      return { ok: true, membershipUntil: j.membershipUntil };
-    } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
-  }, [cloud, profile, connect]);
 
   // Send the pairing SAS for a user-entered code (from the pairing screen).
   const pair = useCallback((code) => {
@@ -313,5 +298,5 @@ export function useRelay(profile, keypair) {
   };
 
   const connected = conn === "open" && (cloud ? (!!agentPubRef.current && paired && !!relayState.codexConnected) : !!relayState.codexConnected);
-  return { conn, connected, cloud, agentFp, relayState, config, models, writerConflict, writerBusy, writerError, events, approvals, diff, tree, actions, membershipUntil, redeem, pair, pairError };
+  return { conn, connected, cloud, agentFp, relayState, config, models, writerConflict, writerBusy, writerError, events, approvals, diff, tree, actions, pair, pairError };
 }
