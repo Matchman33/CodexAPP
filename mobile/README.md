@@ -1,87 +1,93 @@
-# CodexApp 移动端（Expo / React Native）
+# 手机客户端
 
-一套代码，**iPhone 和 Android 都能跑**，在 Windows 上开发，无需 Mac / Xcode / Android Studio。
-连接电脑上的[中继](../relay/server.mjs)，远程控制 Codex：发提示词、纠偏、叫停、审批、看状态。
-协议见 [../PROTOCOL.md](../PROTOCOL.md)。
-
-## 今天就能在真机上跑（Expo Go，最省事）
-
-1. 电脑先启动中继（在仓库根目录）：
-   ```powershell
-   cd C:\test\CodexAPP
-   npm start          # 打印局域网地址 + Token
-   ```
-2. 启动 Expo 开发服务（本目录）：
-   ```powershell
-   cd C:\test\CodexAPP\mobile
-   npm install        # 第一次
-   npx expo start
-   ```
-3. 手机装 **Expo Go**（App Store / Play 商店），和电脑同一 WiFi：
-   - iPhone：用相机扫终端里的二维码 → 在 Expo Go 打开
-   - Android：用 Expo Go 内的扫码功能扫
-4. App 打开后选择 **「中继直连」**，填**中继地址**（如 `http://192.168.1.84:4123`）+ **Token**，点连接。此路线不需要注册云账号。
-
-> iPhone 和 Android 用的是**同一个中继地址 + Token**，跟网页端一样。
+Expo / React Native 客户端支持 iPhone 和 Android，可通过中继直连或云账号连接电脑上的 Codex。
 
 ## 功能
 
-- 连接门：中继地址 + Token（用 AsyncStorage 记住，下次免填）
-- 发提示词 / 纠偏（steer）/ 叫停（interrupt）
-- 审批卡片：批准 / 本会话都批准 / 拒绝
-- 实时状态：running/idle、流式回复、命令执行、文件改动、错误
-- 设置：工作目录 cwd、模型、思考等级、审批策略、沙箱；新建会话；开启审批通知
-- 手机聊天布局：侧边会话抽屉与搜索、快捷新建、中性深色主题、图标化发送与停止
-- 审批到达：震动 + 本地通知（需在设置里授权）
+- 发送消息、查看流式回复、纠偏和停止任务。
+- 查看与搜索项目会话，新建或接续会话。
+- 处理命令和文件改动审批，查看文件差异。
+- 设置工作目录、模型、思考等级、审批策略和沙箱权限。
+- 保存连接配置和设备配对信息。
+- 审批到达时振动或显示本地通知，需获得系统权限。
+- 云连接免费使用，支持多个手机同时连接同账号的 Agent。
 
-## 打包成可独立安装的 App（不依赖电脑开 Expo）
+回复以可选择文本显示。多会话标签、消息队列、文件预览下载和交互终端可通过[网页客户端](../README.md)使用。
 
-用 Expo 的云构建 **EAS**（Windows 上即可，无需 Mac）：
+## 使用 Expo Go
+
+在项目根目录准备并启动电脑中继：
 
 ```powershell
-npm install -g eas-cli
-eas login
-eas build -p android --profile preview   # 出 .apk，可直接装安卓
-eas build -p ios --profile preview        # 出 iOS 包，需 Apple 开发者账号($99/年)
+npm ci
+npm start
 ```
 
-- **Android**：EAS 云构建 `.apk`，下载直接装，完全不用电脑工具链。
-- **iOS**：EAS 也能云构建，但要 Apple 开发者账号来签名 / 装到 iPhone。
+在另一个终端启动手机客户端：
 
-## 远程使用（不在同一 WiFi）
-
-新版设置支持按模型能力选择思考等级。选择「Codex 默认」恢复有效默认；能力未知时支持手动输入服务商等级。模型与等级一起保存到电脑中继或 Agent，从下一条提示词生效，不修改正在运行的任务。原生回复仍以可选择文本显示，网页的 Markdown 与浅深色选择不代表原生端也具备相同渲染。
-
-远程入口由用户自选：NPS/NPC 为首推的公网映射方案，Tailscale Serve 可作为无需自有服务器的私网路线，具体安装和映射边界见 [根目录 README](../README.md#4-手机远程访问用户自选映射)。手机端不负责安装或启动映射工具，云账号模式继续保留。
-
-选择 NPS 或 frp 时，项目电脑的客户端将独立公网端口转发到本机中继。App 选择 **「中继直连」**，使用对应入口和该电脑自己的应用 Token，不使用 NPS vkey 或面板密码。公网 HTTP 只作临时联通测试，不保证原生端明文访问兼容性；正式任务应使用 HTTPS/WSS。
-
-选择 Tailscale 时，电脑先运行中继 `npm start`，再执行 `tailscale serve --bg 4123`；首次按提示授权，确认输出 `Available within your tailnet`。完整操作见 [Tailscale Serve](../README.md#tailscale-serve)。手机需要安装并开启 Tailscale，接入电脑所在的同一网络。在 App 中选择 **「中继直连」** 模式（旧版叫「局域网直连」），中继地址填写 Serve 输出的完整 HTTPS 域名，例如 `https://my-pc.tail123456.ts.net`（替换成实际域名，不加 `:4123`），再填写中继 Token；WebSocket 自动使用 `wss://`。手机保持 Tailscale 连接时，也可用浏览器打开同一地址。
-
-Serve 的 HTTPS 地址和 `100.x.x.x` 的 Tailscale IP 都不是普通公网入口。手机未接入 Tailscale 时无法访问，不需要等待 Funnel 的公网 DNS 生效。两端直连有机会降低延迟，无法直连时仍可能走中继。
-
-Serve 这里只转发中继，不转发 Expo 的 Metro 开发服务。使用 Expo Go 时还需确保手机能访问 Metro；使用网页时，保持 Tailscale 连接并打开 Serve 地址即可。
-
-## 结构
-
-```
-mobile/
-├─ App.js                 # 根：连接门 vs 主界面，凭证持久化
-├─ src/
-│  ├─ useRelay.js         # WS 连接 + 重连 + 消息分发 + 动作 + 审批通知
-│  ├─ storage.js          # AsyncStorage 存中继地址/Token
-│  ├─ theme.js            # 配色
-│  ├─ SetupScreen.js      # 连接门
-│  ├─ MainScreen.js       # 头部状态 + 事件流 + 审批 + 输入框
-│  ├─ ApprovalCard.js     # 审批卡片
-│  └─ SettingsModal.js    # 设置面板
-└─ app.json               # Expo 配置
+```powershell
+cd mobile
+npm ci
+npx expo start
 ```
 
-## 故障排查
+手机安装与项目 SDK 匹配的 Expo Go，并保证可以访问电脑的开发服务。iPhone 使用相机扫描二维码，Android 使用 Expo Go 扫码。
 
-- **扫码后连不上 Metro**：手机和电脑要同一 WiFi；或 `npx expo start --tunnel`（走隧道，跨网络）。
-- **App 里连不上中继**：局域网访问时使用电脑 `npm start` 打印的实际局域网 IP，检查防火墙是否允许 4123。Serve 远程访问时，先开启手机 Tailscale，再使用它输出的 HTTPS 域名，不加 `:4123`，确认选择「中继直连」模式和正确 Token。两种方式都要求中继持续运行。
-- **Serve 域名打不开**：确认手机已接入同一 Tailscale 网络，再访问 `https://<实际域名>/health`。返回 `"ok": true` 表示转发正常；若仍失败，检查电脑在线状态、MagicDNS、访问规则与本地中继，不等待 Funnel 公网 DNS。
-- **状态卡在「中继已连，等待 Codex」**：中继没连上 codex，看中继终端日志。
-- **收不到通知**：设置里点「开启审批通知」并在系统里允许。
+## 中继直连
+
+1. 确认电脑中继正在运行。
+2. 手机客户端选择“中继直连”。
+3. 填写电脑的局域网地址，例如 `http://192.168.1.84:4123`，或已配置的远程访问地址。
+4. 填写中继启动终端显示的 Token，点击连接。
+
+使用 NPS/NPC 或 frp 时填写映射后的地址；使用 Tailscale Serve 时，手机需开启 Tailscale，并填写 Serve 输出的完整 HTTPS 地址。配置步骤见[远程访问](../docs/使用指南.md#远程访问)。
+
+Expo Go 还需要访问 Metro 开发服务；中继的端口转发不包含 Metro。
+
+## 云账号连接
+
+在 `src/config.js` 中设置目标 Broker 地址：
+
+```javascript
+export const BROKER_URL = "http://你的服务器IP:8787";
+```
+
+加载客户端后：
+
+1. 在电脑 Agent 中登录云账号。
+2. 手机选择“云账号”，登录相同账号。
+3. 电脑端启用配对码模式时，在手机输入电脑面板显示的配对码。
+4. 连接成功后，新建会话或打开会话列表。
+
+每个账号对应一台在线 Agent。其他手机可以使用同一账号分别配对，查看同一会话或不同会话。账号被管理员停用时，客户端显示“账号已停用”；管理员恢复后，退出连接并重新登录。
+
+注册、邮箱验证及电脑面板设置见[云账号使用](../cloud/README.md)。
+
+## 模型和权限
+
+在设置中刷新模型列表，选择模型和思考等级，点击应用。也可填写自定义模型 ID；选择“Codex 默认”使用工作目录中的有效配置。
+
+运行中的任务不因设置变化而中断。模型与思考等级从下一条任务生效；权限变化的状态以界面显示为准。审批和会话占用需要按提示明确处理。
+
+## 构建客户端
+
+导出 Android JavaScript 包及资源：
+
+```powershell
+npx expo export --platform android --output-dir dist
+```
+
+导出文件不是 APK。独立安装包需要在自己的 Expo 项目中配置 EAS Build 和平台签名，然后执行对应平台的构建命令。iOS 安装需符合所选分发方式的 Apple 签名要求。
+
+## 常见问题
+
+| 问题 | 处理方式 |
+|---|---|
+| 扫码后无法打开 | 检查手机能否访问 Metro、网络和防火墙，以及 Expo Go 的 SDK 支持 |
+| 无法直连 | 使用电脑实际局域网 IP，检查中继端口及 Token |
+| 云端等待电脑 | 检查 Agent 是否运行、是否登录同一账号 |
+| Codex 未连接 | 查看电脑日志，确认 Codex 路径及登录或 API 配置 |
+| 账号已停用 | 联系管理员恢复，再重新登录 |
+| 没有审批通知 | 在设置中开启通知并检查系统权限，保持客户端连接 |
+
+手机进入后台或锁屏时，连接及通知到达时间受系统限制。返回客户端后可重新连接并查看待处理审批。

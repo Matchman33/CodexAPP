@@ -1,7 +1,7 @@
 # CodexApp 客户端 ↔ 中继 协议
 
 所有客户端（web / iOS / Android）都通过 **WebSocket** 连接同一个中继，说同一套 JSON 协议。
-这是三端实现的唯一事实来源。中继实现见 [relay/server.mjs](relay/server.mjs)。
+本文件说明消息字段和调用方式。连接入口见 [relay/transport.mjs](relay/transport.mjs)。
 
 ## 连接
 
@@ -50,7 +50,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
   "effectiveReasoningEffort": "high|null", // 最近一次任务的实际等级
   "approvalPolicy": "on-request" | "untrusted" | "on-failure" | "never",
   "sandbox": "workspace-write" | "read-only" | "danger-full-access", // 用户已保存的选择
-  "permissions": { // 可选；旧后端没有此字段
+  "permissions": { // 可选的权限状态
     "supported": true,
     "applied": { "sandbox": "workspace-write", "approvalPolicy": "on-request" } | null,
     "pending": false,
@@ -93,7 +93,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ### 生成文件下载
 
-文本预览继续使用同一 `readAttachment` 分块协议，不新增传输方案或接口。网页根据已登记的文件扩展名提供纯文本预览，最多展示前 1 MiB，取得所需分块后停止请求剩余内容；完整下载仍从头获取全部分块。`files[].preview` 保持原有的光栅图片含义，文本预览由网页识别，不改变旧客户端协议。下载进度和错误只显示在聊天附件内，不再提供全局已接收/保存状态栏。
+文本预览使用 `readAttachment` 分块协议。网页根据已登记的文件扩展名提供纯文本预览，最多展示前 1 MiB，取得所需分块后停止请求剩余内容；完整下载仍从头获取全部分块。`files[].preview` 表示光栅图片预览，文本预览由网页根据文件类型识别。下载进度和错误显示在聊天附件内。
 
 同一附件可带可选 `references[]`，包含助手对该文件使用的多个路径写法。网页在 Markdown 清理前将已登记的文件链接映射为内部片段标记，图片引用映射为预览，文字链接映射为下载；不会放开 `file:`、Windows 驱动器路径或不安全 URL 协议的浏览器导航。附件始终通过当前连接传输，NPS 入口不需要额外下载端口或回环地址；接收完成后的保存链接使用浏览器本地 Blob。
 
@@ -115,7 +115,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ### 会话管理
 
-新版 `hello.threadManagement` 为 `{delete:true,release:true}`。未声明能力的后端禁用对应网页按钮；Codex 运行时不支持接口则返回错误，不回退为磁盘删除或结束外部进程。
+`hello.threadManagement` 为 `{delete:true,release:true}`。未声明能力的后端禁用对应网页按钮；Codex 运行时不支持接口则返回错误，不回退为磁盘删除或结束外部进程。
 
 | type | 字段 | 说明 |
 |---|---|---|
@@ -132,7 +132,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ### 图片输入
 
-`hello.imageUpload` 为 `{ supported:true, count:4, bytes:1048576, totalBytes:4194304, previewBytes:8192, queueChars:25165824 }`。未声明能力的旧后端不应接收图片请求；前端禁用选图，不影响文字消息。
+`hello.imageUpload` 为 `{ supported:true, count:4, bytes:1048576, totalBytes:4194304, previewBytes:8192, queueChars:25165824 }`。未声明能力的后端不应接收图片请求；前端禁用选图，不影响文字消息。
 
 `prompt`、`enqueuePrompt`、`steer` 的可选 `images` 形如：
 
@@ -162,7 +162,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | `listModels` | `cwd?` | 从电脑端 Codex 获取模型列表与该目录的默认模型 |
 | `getState` | — | 请求重新下发快照 |
 | `listThreads` | — | 请求会话/项目列表，服务端回 `projectTree` |
-| `readThread` | `threadId`, `historyMode?`, `requestId?` | 只读打开或切换查看目标，不检查占用、不停止其他会话；旧 `checkWriter` 标记不再生效 |
+| `readThread` | `threadId`, `historyMode?`, `requestId?` | 只读打开或切换查看目标，不检查占用、不停止其他会话 |
 | `historyPage` | `threadId`, `cursor?`, `requestId` | 只读获取历史页；省略游标获取最新页，回 `historyPage` |
 | `readHistoryItem` | `threadId`, `detailCursor`, `offset?`, `requestId` | 分段读取超长消息或工具输出，回 `historyItem` |
 | `resumeThread` | `threadId` | 接续已有会话（切到它的项目 cwd，继续这段对话） |
@@ -171,9 +171,9 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 `projects[]` 每条：`{ id, root, roots[], label, threads[] }`；`projectless[]` 和 `threads[]` 每条：`{ id, name, cwd, updatedAt(秒), source }`。`state` 增加 `threadName`(当前会话名)、`lastDiff` 和 `readOnly`。
 
-列表读取所有模型提供商的非归档交互会话，遍历分页并按会话 ID 去重。新版项目 ID 由 `local-projects` 解析，显式 `thread-project-assignments` 优先于路径匹配，兼容旧版目录格式、多个工作根目录和工作区提示。未分配的会话保留在对话组，不再静默丢弃。
+列表读取所有模型提供商的非归档交互会话，遍历分页并按会话 ID 去重。项目 ID 由 `local-projects` 解析，显式 `thread-project-assignments` 优先于路径匹配，支持多个工作根目录和工作区提示。未分配的会话显示在对话组。
 
-打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。新版网页启用下方的历史分页模式；未传 `historyMode` 的旧客户端保留完整历史读取兼容路径。历史包含文本、附件路径、计划、推理摘要和工具结果；经图片上传功能发送的附件可恢复缩略图，原图不作为历史文本传输，也不自动读取其他本地图片路径或下载远程地址。事件可附带 `itemId`、`threadId`、`turnId`、`phase`、`images`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
+打开列表中的会话使用 `readThread`；仅发送提示词或明确接续时才调用 `thread/resume`。占用时保持历史和草稿，不自动结束其他进程。网页启用下方的历史分页模式；未传 `historyMode` 时读取完整历史。历史包含文本、附件路径、计划、推理摘要和工具结果；经图片上传功能发送的附件可恢复缩略图，原图不作为历史文本传输，也不自动读取其他本地图片路径或下载远程地址。事件可附带 `itemId`、`threadId`、`turnId`、`phase`、`images`；同一 `event.id` 更新替换，流式回复按 `itemId` 归并，切换快照时清空旧流式状态。
 
 ### 历史分页与缓存
 
@@ -181,7 +181,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ### 多会话与受控重启
 
-`hello.multiSession.supported:true` 表示支持多会话。直连在 WebSocket 查询中发送 `clientId`；云端在内层命令中发送 `clientId`。选择按客户端隔离，旧客户端未提供标识时使用 `legacy` 选择。命令可携带 `threadId` 明确目标；状态、事件、队列、审批和定向响应携带会话/客户端标识，前端不能将后台状态应用到当前页面。`sessions` 返回会话摘要列表，包含 `threadId/name/cwd/projectless/status/approvals/queued`。
+`hello.multiSession.supported:true` 表示支持多会话。直连在 WebSocket 查询中发送 `clientId`；云端在内层命令中发送 `clientId`。选择按客户端隔离；直连未提供标识时使用 `legacy` 选择，云 Agent 为各手机分配独立标识。命令可携带 `threadId` 明确目标；状态、事件、队列、审批和定向响应携带会话/客户端标识，前端不能将后台状态应用到当前页面。`sessions` 返回会话摘要列表，包含 `threadId/name/cwd/projectless/status/approvals/queued`。
 
 每个会话独立管理权限、队列、审批、历史和命令顺序，共享一个 Codex RPC 连接。历史与附件读取不进入任务控制队列。`closeThread {threadId}` 只关闭浏览标签，活动任务或等待队列仍保留；`watchThread {threadId,requestId}` 只读获取最新有界历史页，响应 `historyUpdate` 包含分页数据、`syncedAt`，已取得写入权时返回 `skipped:true`。前端轮询退避，不获取写入权；阅读旧页时不自动跳至最新位置。
 
@@ -212,7 +212,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 普通消息的实时回显可附带 `inputEcho:true`。任务受理后使用同一 `event.id` 补齐实际 `turnId`，不是再次提交提示词。网页发现同一会话、同一轮次且文本一致的持久化用户条目时移除对应临时回显；不同轮次的相同文本仍保留为独立消息。
 
-新版网页直连时在 WebSocket 地址增加 `history=paged`；云端通过 `getState` 的 `historyMode:"paged"` 启用。打开和新建会话也传递该模式。分页快照的 `history` 为 `{ paged:true, nextCursor:string|null }`；旧客户端未声明模式时仍可通过原 `readThread` 读取完整历史，但不享受后端有界缓存优化。
+网页直连时在 WebSocket 地址增加 `history=paged`；云端通过 `getState` 的 `historyMode:"paged"` 启用。打开和新建会话也传递该模式。分页快照的 `history` 为 `{ paged:true, nextCursor:string|null }`；未声明分页模式时，`readThread` 返回完整历史。
 
 - 首次读取会话元数据时不包含完整轮次；每页最多 50 个事件、65536 个文本字符，每个事件预览最多 8192 个字符。字符数按 JavaScript UTF-16 字符串长度计算，不等于网络字节数。
 - `events[]` 为正序；客户端用 `nextCursor` 请求更早页，再前置到当前消息。游标绑定会话并签名，重启服务后失效；错误时重新打开会话，不伪造游标。
@@ -222,20 +222,20 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 - 历史及内容响应回传 `requestId` 和 `threadId`；客户端忽略迟到或不匹配的结果。历史分页不进入任务控制队列，不等待分页完成才处理审批或停止。
 - 浏览历史的页数不改变 Codex 模型上下文。接续仍由 Codex 加载自己的完整上下文，并保留运行中 `turnId`；不是把模型历史截断到 50 条。
 
-接口适配依次使用 `thread/items/list`、旧版 `thread/turns/items/list`。若二者都未实现，则降级为 `thread/turns/list` 一次读取一轮完整条目，再生成有限显示页。此降级仍避免一次传输全部会话，但单轮巨量输出的读取开销及 Codex 内部读盘行为不能由网页分页彻底消除。不支持轮次分页时返回错误，不偷偷改用写入接续读取历史。
+历史分页需要 Codex 提供条目或轮次分页能力。不支持时返回错误，不通过写入接续读取历史；单轮输出很大时，读取仍可能需要较长时间。
 
 ### 模型设置
 
 `hello.config` 包含 `model`；`state.model` 表示已选模型 ID，`null` 表示跟随 Codex 配置。
 `models[]` 每条为 `{ model, displayName, description, isDefault }`，其中 `model` 是实际发送的 ID。列表来自 Codex `model/list`，过滤隐藏项并处理分页，不保证服务商支持每一个目录项。`defaultModel` 优先读取指定目录的有效 Codex 配置，因此可以是目录列表之外的服务商别名。
 
-每条模型另含 `supportedReasoningEfforts: [{ reasoningEffort, description }] | null` 与 `defaultReasoningEffort: string | null`。支持列表为 `null` 表示能力未知（兼容旧服务端）；空数组表示没有可选择的明确等级，两者不能混同。顶层 `models.defaultReasoningEffort` 是指定目录 Codex 配置中的默认值。
+每条模型另含 `supportedReasoningEfforts: [{ reasoningEffort, description }] | null` 与 `defaultReasoningEffort: string | null`。支持列表为 `null` 表示能力未知；空数组表示没有可选择的明确等级，两者不能混同。顶层 `models.defaultReasoningEffort` 是指定目录 Codex 配置中的默认值。
 
 `setConfig` 支持 `reasoningEffort: string | null`；省略则保留原选择，`null` 或空字符串恢复默认。等级允许小写字母开头、字母/数字/下划线/连字符，总长不超过 64；允许服务商扩展值，不将等级固定为一套枚举。已知模型只接受其支持列表内的值；能力未知或自定义模型允许显式指定，由实际调用确认支持情况。模型与等级同时校验并原子保存，失败不会部分更新，也不会返回成功确认。
 
 下一轮通过 `turn/start.effort` 显式传入所选或解析出的默认等级；不更改当前运行任务。恢复默认优先使用与模型匹配的 `config/read.config.model_reasoning_effort`，再使用模型目录默认值。接续后重新解析，避免已有会话的等级粘滞。无法解析默认且原会话已有明确等级时返回错误，要求明确选择。模型能力目录用于发送校验时每 60 秒尝试重新获取，失败保留上次成功目录，主动刷新列表会更新缓存。
 
-`setConfig` 新增可选字段 `model: string | null` 与 `requestId: string`。省略 `model` 保持原选择；空字符串或 `null` 恢复默认；其他类型、含空白或超过 200 字符的 ID 返回 `error`。自定义 ID 不要求出现在列表中。
+`setConfig` 可选字段包括 `model: string | null` 与 `requestId: string`。省略 `model` 保持原选择；空字符串或 `null` 恢复默认；其他类型、含空白或超过 200 字符的 ID 返回 `error`。自定义 ID 不要求出现在列表中。
 选择保存成功后才广播状态并返回 `configSaved`；错误返回原 `requestId`，客户端不应提前显示保存成功。模型、等级、审批策略与沙箱选择持久化到中继或 Agent 配置，不覆盖凭据。工作目录仍为原有内存设置行为。
 
 ### 会话权限同步
@@ -250,15 +250,15 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ## 实时条目与结构化展示
 
-思考增量支持 `item/reasoning/summaryTextDelta` 和 `item/reasoning/textDelta`，归一为 `itemDelta`；新增可选 `reasoningSource`（`summary` / `content`）标记当前文本来源。摘要优先：正文已显示后首次收到摘要，清空原正文窗口及位置再累计摘要；收到摘要后忽略后续正文，二者不拼接。空的思考结束事件也更新原条目状态，保留已收到的文本；结束事件仅有正文时不覆盖已有摘要。历史读取优先返回实际摘要，没有摘要时使用实际正文。不会请求或补造上游未提供的内容。
+思考增量支持 `item/reasoning/summaryTextDelta` 和 `item/reasoning/textDelta`，归一为 `itemDelta`；可选 `reasoningSource`（`summary` / `content`）标记当前文本来源。摘要优先：正文已显示后首次收到摘要，清空原正文窗口及位置再累计摘要；收到摘要后忽略后续正文，二者不拼接。空的思考结束事件也更新原条目状态，保留已收到的文本；结束事件仅有正文时不覆盖已有摘要。历史读取优先返回实际摘要，没有摘要时使用实际正文。不会请求或补造上游未提供的内容。
 
 网页在思考执行中且文本为空时显示等待状态；正常结束后仍为空则隐藏条目，但保留失败或中断状态及错误信息。空内容占位不计入文本长度，流式内容仍受既有预览上限约束。
 
 消息排序以条目开始时的位置为准，不以首个文字片段或完成事件的到达时间重新排序。空的助手开始事件保留相同条目 ID 和位置，网页不显示空气泡。分页合并以历史页内的顺序为准，实时独有记录保留在相邻已知条目前；用户临时回显按会话、轮次及文本匹配持久化消息后，在原位置替换身份，避免跨页读取时改变消息及状态提示的顺序。
 
-`assistantDelta`、`outputDelta` 和新增 `itemDelta` 携带 `threadId`、`turnId`、`itemId`、`kind`、`text`。`text` 仍为本次增量，不随每个片段反复发送完整预览。命令旧版通知的 `callId` 可作为条目 ID；无法识别条目的输出忽略，不猜测其目标。过期会话、过期任务和已结束条目的输出不覆盖当前消息。
+`assistantDelta`、`outputDelta` 和 `itemDelta` 携带 `threadId`、`turnId`、`itemId`、`kind`、`text`。`text` 仍为本次增量，不随每个片段反复发送完整预览。命令通知的 `callId` 可作为条目 ID；无法识别条目的输出忽略，不猜测其目标。过期会话、过期任务和已结束条目的输出不覆盖当前消息。
 
-`event` 及快照条目继续提供兼容 `text`，可新增以下字段：
+`event` 及快照条目提供 `text`，并可包含以下字段：
 
 - `live`、`status`：实时或完成状态；启动、输出、完成保持相同事件 ID。状态为 `running`、`completed`、`failed`、`interrupted` 或 `ended`。任务结束时收尾未完成条目，`ended` 不等同于成功。
 - 命令：`command`（最多 2048 字符）、`exitCode`、`durationMs`、`output`（最多 8192 字符）、`outputLength`、`outputStart`。`outputStart` 为兼容文本中命令输出的绝对开始位置，历史分段据此避免重复显示命令头。
@@ -267,13 +267,13 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 分页模式实时条目最多保留 `text` 最新窗口和 `headText` 开头窗口各 8192 字符，`textOffset` 为当前窗口绝对位置，`textLength` 为完整长度，`preview` 为 `head` 或 `tail`。实时窗口不保证包含全部中间文本；接续历史开头后新增内容按真实偏移记录，不伪造连续窗口。`headText` 仅在实时截断条目上保留，完成后移除，用 `detailCursor` 分段获取完整内容。历史页的字符限制仍只计算 `text`，上述有界结构化字段另有传输开销，不能将其误认为整个 JSON 的字节上限。
 
-网页实时片段只更新目标事件，按浏览器帧渲染；分页加载和持久化回显身份归并仍保留原路径。截断内容使用纯文本，不解析被截断的 Markdown。旧客户端可以忽略新增字段继续显示 `text`，但不会自动获得新的工具状态界面。
+网页实时片段只更新目标事件，按浏览器帧渲染；分页加载和持久化回显身份归并仍保留原路径。截断内容使用纯文本，不解析被截断的 Markdown。客户端可根据这些字段展示工具状态。
 
 ## 消息队列
 
 `setConfig` 的 `approvalPolicy` 与 `sandbox` 同模型和思考等级一起校验并原子保存。只有持久化成功后才更新后端选择状态并返回 `configSaved`；保存失败不报告成功。审批策略允许 `on-request`、`untrusted`、`on-failure`、`never`，沙箱允许 `workspace-write`、`read-only`、`danger-full-access`。未传字段保留原选择，存储中的其他字段和凭据不覆盖。下一次 `turn/start` 显式传入当前审批策略；已有任务及待处理审批仍遵循其原请求，不自动批准。
 
-新增命令：
+队列命令：
 
 | type | 字段 | 说明 |
 |---|---|---|
@@ -282,7 +282,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | pauseQueue | threadId, requestId? | 暂停该会话后续消息，不中断当前任务 |
 | resumeQueue | threadId, requestId? | 手动继续当前会话队列；运行中的任务仍需先完成 |
 
-快照新增 promptQueue，字段为 supported、threadId、paused、reason、items、activeId、acceptedRequestIds、limit。items 包含 id、requestId、threadId、text、可选 cwd，以及 status（queued 或 starting）；activeId 表示正在启动或执行的队列消息。任务受理并取得 turnId 后从等待列表移除，不代表任务已完成。
+快照中的 promptQueue，字段为 supported、threadId、paused、reason、items、activeId、acceptedRequestIds、limit。items 包含 id、requestId、threadId、text、可选 cwd，以及 status（queued 或 starting）；activeId 表示正在启动或执行的队列消息。任务受理并取得 turnId 后从等待列表移除，不代表任务已完成。
 
 队列变化广播 type:"promptQueue"、queue；入队受理回传 type:"promptAccepted"、id、requestId、threadId、queue。后端先登记受理凭据再调度执行；受理不代表任务成功。错误沿用 type:"error" 并回传原 requestId。客户端应匹配自己的请求 ID 后清空对应草稿，不能把其他客户端的确认当成自己的发送确认。
 
@@ -290,7 +290,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 队列平时保存在电脑端内存，关闭网页后继续保留；受控重启额外写入一次性恢复文件并暂停恢复，普通崩溃不保证恢复。全会话合计上限为 20 条、262144 字符，单条最多 65536 字符（UTF-16 长度）。同一会话 FIFO，仅成功完成才自动推进；中断、失败、未知状态、占用或 Codex 断连均暂停相应队列。多会话切换不暂停后台队列，不同会话可并行，开始执行时采用该会话当前设置。
 
-普通 prompt 保留给旧客户端，但运行中拒绝启动第二个任务。steer 不进入队列。入队时不生成用户气泡；开始执行才生成带稳定 id 和 inputEcho:true 的临时回显，并在取得任务 ID 后补齐 turnId。队列调度与任务控制共用串行命令链，历史分页仍独立处理。
+普通 prompt 可启动空闲会话的任务，运行中拒绝启动第二个任务。steer 不进入队列。入队时不生成用户气泡；开始执行才生成带稳定 id 和 inputEcho:true 的临时回显，并在取得任务 ID 后补齐 turnId。队列调度与任务控制共用串行命令链，历史分页仍独立处理。
 
 ## 典型时序
 

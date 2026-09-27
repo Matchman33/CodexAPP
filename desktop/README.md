@@ -1,29 +1,59 @@
-# CodexApp 电脑客户端(原生桌面版 / Electron)
+# 电脑客户端
 
-真正的桌面程序窗口(不是网页):内部运行 agent(连 Broker + 驱动本地 Codex),
-界面在一个原生 Electron 窗口里显示。
+Electron 电脑客户端在桌面窗口中提供 Agent 登录、注册、连接状态、设备指纹和配对码管理。
 
-当前桌面启动器运行的是保留的云 Agent 路线，不会启动根目录的本地 4123 中继，也不安装或启动 NPC。选择 NPS、Tailscale 或局域网直连时，在根目录启动本地中继，按 [主说明的远程访问章节](../README.md#4-手机远程访问用户自选映射) 自行维护映射；不能把本目录的 npm start 当成本地中继入口。
+## 功能
 
-## 开发运行
-```bash
+- 使用云账号连接 Broker，供手机远程访问本机 Codex。
+- 支持同账号免码连接和配对码模式。
+- 显示在线客户端数量、授权状态和错误信息。
+- 使用本机共享中继，与直连客户端共用任务、审批和终端。
+- 在用户配置目录保存登录与设备信息。
+
+## 运行
+
+电脑需安装 Node.js，并完成 Codex 登录或 API 配置。在项目根目录安装依赖：
+
+```powershell
+npm ci
+```
+
+然后进入桌面客户端目录：
+
+```powershell
 cd desktop
-npm install
-npm start          # 打包 agent + 启动 electron 窗口
+npm ci
+$env:CODEXAPP_BROKER = "http://你的服务器IP:8787"
+npm start
 ```
 
-## 打包成安装程序(Windows)
-```bash
-npm run dist       # 产出 dist/CodexApp-Setup-<version>.exe (NSIS 安装包)
-```
-> 在哪个系统上打包就出哪个系统的安装包(Electron 不能交叉编译)。macOS 上 `npm run dist` 需改用 mac target。
+`npm start` 会构建 Agent、网页及终端运行文件，再打开桌面窗口。
 
-## 说明
-- `build.mjs` 用 esbuild 把 `../cloud/agent.mjs` 打成 `agent.cjs`,由 Electron 主进程 require。
-- 配置/密钥存在用户目录(`app.getPath("userData")`),不在安装目录。
-- 云端 Broker 使用现有 Agent 配置；它与根目录本地中继是不同路线，具体配置见 [云端说明](../cloud/README.md)。
-- 未签名:Windows SmartScreen 首次会提示,正式发布请用代码签名证书。
+1. 在窗口中注册或登录云账号。
+2. 确认 Broker 和 Codex 已连接。
+3. 需要配对码时，在窗口中切换连接模式。
+4. 手机打开 Broker 网页或手机客户端，登录相同账号并完成配对。
 
-## 交互终端运行文件
+## 配置
 
-新增终端使用 `node-pty` 原生运行文件和独立的 `terminalPtyWorker.cjs`。`node build.mjs` 会准备并复制这些文件；分发包需要连同 `node_modules/node-pty`、相关依赖和 worker 一起保留，不能只复制 `agent.cjs`。Windows 的 ConPTY DLL 按构建电脑架构准备，跨平台或跨架构分发需在目标平台构建验证。源码 Node 模式已验证，Electron 安装包需重新构建后实机验收终端。
+桌面客户端使用 Electron 的用户数据目录保存 `agent.config.json`、设备密钥和配对信息。
+
+`CODEXAPP_BROKER` 指定云端地址；`CODEXAPP_RELAY_CONFIG` 可指定本机中继配置文件。需要与源码启动的中继共享服务时，让两端使用同一份中继配置。
+
+账号停用、会话占用和项目重启的操作说明见[使用指南](../docs/使用指南.md)与[云账号使用](../cloud/README.md)。
+
+## 打包
+
+在 `desktop` 目录运行：
+
+| 命令 | 产物 |
+|---|---|
+| `npm run bundle` | 构建 Agent、网页和终端运行文件 |
+| `npm run dist` | Windows NSIS 安装程序 |
+| `npm run dist:portable` | Windows x64 便携目录及 ZIP |
+
+产物位于 `desktop/dist/`。便携分发需保留完整目录，包括网页资源、终端 worker 和 `node-pty` 依赖。
+
+项目的上述分发命令面向 Windows。终端原生模块与构建平台、架构相关，请使用与目标环境匹配的构建产物。
+
+Windows 签名配置见[代码签名](../SIGNING.md)。

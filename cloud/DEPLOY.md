@@ -1,143 +1,158 @@
-# 部署 CodexApp Broker（生产）
+# 部署 Broker
 
-你只需要部署 **Broker**（一台小服务器）。Agent 跑在用户电脑、App 在用户手机——它们都**主动外连**你的 Broker，所以 Broker 只要有个公网域名 + HTTPS 即可。
+Broker 提供云账号登录、手机与 Agent 连接、网页客户端和管理后台。支持公网 IP 的 HTTP/WS 入口，以及 HTTPS/WSS 入口。
 
 ## 准备
 
-- 一台 VPS（1 核 512MB 起步就够，Broker 很轻）
-- 一个域名指向它，例如 `broker.yourdomain.com`
-- **Node ≥ 22**（Broker 用内置 `node:sqlite` 存账号）
-- 一个发信渠道（SMTP / SendGrid / Mailgun / SES…）用于发验证邮件
+- 可从手机和电脑访问的服务器。
+- 支持内置 `node:sqlite` 的 Node.js、npm 和 Git。
+- 可用的访问端口，例如 `8787`，并放行服务器防火墙及云安全组。
+- 需要邮件注册和找回密码时，准备 SMTP 配置；也可由管理员手动验证账号。
 
-## 一键部署（推荐）
+以下使用 Linux、systemd 和 `/opt/codexapp` 目录。服务器只需运行 Broker，电脑端 Codex 的登录信息留在电脑上。
 
-在服务器上(域名 DNS 已指向它),用 root 运行:
+## 安装项目
+
+创建运行用户和程序目录：
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LuckyYouStudio/CodexAPP/main/cloud/deploy.sh -o deploy.sh
-sudo bash deploy.sh        # 按提示填:域名、管理员邮箱、SMTP
-```
-脚本自动:装 Node22 + Caddy → 拉代码 → 配 `/etc/codexapp/broker.env`(含随机生成的 `ADMIN_TOKEN`)→ systemd 常驻 Broker → Caddy 自动 HTTPS。完成后访问 `https://你的域名/` 即网页客户端,`https://你的域名/admin` 是**管理后台**(脚本结尾会打印管理员令牌)。再次运行 = 更新代码 + 重启(保留原令牌)。
-
-下面是手动步骤(想自己控制时参考)。
-
-## 方式 A：Caddy 自动 HTTPS（推荐，最省事）
-
-让 Caddy 反向代理并自动签 Let's Encrypt 证书，Broker 本身只在本地跑明文。
-
-```
-# /etc/caddy/Caddyfile
-broker.yourdomain.com {
-    reverse_proxy 127.0.0.1:8787
-}
+sudo useradd --system --create-home --home-dir /var/lib/codexapp --shell /usr/sbin/nologin codexapp
+sudo mkdir -p /opt/codexapp /etc/codexapp
+sudo chown codexapp:codexapp /opt/codexapp
+sudo -u codexapp git clone https://github.com/Matchman33/CodexAPP.git /opt/codexapp
+cd /opt/codexapp
+sudo -u codexapp npm ci
+sudo -u codexapp npm run build:web
 ```
 
-Broker 本地起（明文，仅监听本机）：
+项目依赖包含原生终端模块。Linux 安装依赖时如需本机编译，请准备 Python 3、make 和 C/C++ 编译工具。
+
+网页的 `web/vendor/` 构建产物需要随网页一起部署。使用本地打包上传时，也要包含这些文件。
+
+## 配置入口与后台令牌
+
+生成独立的后台令牌：
+
 ```bash
-HOST=127.0.0.1 PORT=8787 PUBLIC_URL=https://broker.yourdomain.com node cloud/broker.mjs
+openssl rand -hex 32
+sudoedit /etc/codexapp/broker.env
 ```
-Caddy 负责对外的 `https/wss`。WebSocket 升级 Caddy 默认透传，无需额外配置。
 
-## 方式 B：Broker 原生 TLS
+在配置文件中填写以下内容，并替换服务器 IP 和后台令牌：
 
-用 certbot 拿证书，直接让 Broker 监听 443：
+```dotenv
+HOST=0.0.0.0
+PORT=8787
+PUBLIC_URL=http://你的服务器IP:8787
+DB_PATH=/var/lib/codexapp/codexapp.db
+ADMIN_TOKEN=生成的随机令牌
+```
+
+限制配置文件权限：
+
 ```bash
-sudo certbot certonly --standalone -d broker.yourdomain.com
-sudo HOST=0.0.0.0 PORT=443 PUBLIC_URL=https://broker.yourdomain.com \
-  TLS_CERT=/etc/letsencrypt/live/broker.yourdomain.com/fullchain.pem \
-  TLS_KEY=/etc/letsencrypt/live/broker.yourdomain.com/privkey.pem \
-  node cloud/broker.mjs
+sudo chmod 600 /etc/codexapp/broker.env
 ```
-启动日志会显示 `[https/wss]`。
 
-## systemd 常驻
+HTTP/WS 入口不要求域名和证书，登录请求通过 HTTP 传输。配置 HTTPS 反向代理时，通常将 `HOST` 改为 `127.0.0.1`，并将 `PUBLIC_URL` 设置为外部 HTTPS 地址；代理需转发 WebSocket 连接。
+
+Broker 也支持直接提供 HTTPS。在环境文件中设置 `TLS_CERT` 和 `TLS_KEY` 为可读取的 PEM 文件路径，并配置对应监听端口。
+
+## 设置开机启动
+
+创建服务文件：
+
+```bash
+sudoedit /etc/systemd/system/codexapp-broker.service
+```
+
+内容如下，`ExecStart` 中的 Node 路径可通过 `command -v node` 确认：
 
 ```ini
-# /etc/systemd/system/codexapp-broker.service
 [Unit]
 Description=CodexApp Broker
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-WorkingDirectory=/opt/codexapp
-Environment=HOST=127.0.0.1 PORT=8787 PUBLIC_URL=https://broker.yourdomain.com ADMIN_TOKEN=换成够长的随机串
-Environment=SMTP_HOST=smtp.yourprovider.com SMTP_PORT=587 SMTP_USER=apikey SMTP_PASS=*** SMTP_FROM=no-reply@yourdomain.com
-ExecStart=/usr/bin/node cloud/broker.mjs
-Restart=always
+Type=simple
 User=codexapp
+Group=codexapp
+WorkingDirectory=/opt/codexapp
+EnvironmentFile=/etc/codexapp/broker.env
+ExecStart=/usr/bin/node /opt/codexapp/cloud/broker.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+启动并检查服务：
+
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable --now codexapp-broker
+systemctl status codexapp-broker --no-pager
+curl http://127.0.0.1:8787/health
 ```
+
+健康检查应返回包含 `"ok": true` 的 JSON。然后从手机打开配置的 `PUBLIC_URL`，确认网页可访问。
+
+## 配置客户端
+
+电脑在启动 Agent 的终端中设置同一个地址：
+
+```powershell
+$env:CODEXAPP_BROKER = "http://你的服务器IP:8787"
+npm run start:agent
+```
+
+手机网页直接访问该地址。Expo 手机端在 `mobile/src/config.js` 中设置 `BROKER_URL`，然后运行或构建客户端。
+
+账号注册、登录和配对步骤见[云账号使用](README.md)。
 
 ## 管理后台
 
-访问 `https://broker.yourdomain.com/admin`,用 `ADMIN_TOKEN`(在 `broker.env`,一键部署会随机生成并在结尾打印)登录。功能:
+访问 `PUBLIC_URL` 对应地址下的 `/admin`，使用 `ADMIN_TOKEN` 登录。
 
-- **SMTP 设置**:可视化填发信邮箱(主机/端口/用户名/密码/发件人/TLS),**保存即时生效,无需重启**,带「测试连接」。这是配发验证邮件最省事的方式 —— 不必去服务器改 env。
-- **概览**：总用户、已验证、已停用账号及当前在线账号和连接数。
-- **用户管理**：标记邮箱验证、重发验证邮件、停用或恢复账号、退出全部设备、删除账号。
+| 功能 | 操作 |
+|---|---|
+| SMTP 配置 | 填写服务器、端口、用户名、密码、发件人和 TLS 设置，保存后生效 |
+| 连接概览 | 查看在线账号、电脑连接和手机连接数量 |
+| 邮箱验证 | 手动标记已验证，或重发验证邮件 |
+| 停用账号 | 立即断开云连接，并禁止该账号再次登录 |
+| 恢复账号 | 允许重新登录，停用前的令牌仍失效 |
+| 退出全部设备 | 撤销当前登录，用户可主动重新登录 |
+| 删除账号 | 删除账号记录并断开其云连接 |
 
-> SMTP 优先级:后台填的值(存在数据库)**覆盖** env 里的 `SMTP_*`。即未配 env 也行,登录后台填即可。
-> 没设 `ADMIN_TOKEN` 时 `/admin` 接口返回「admin 未启用」,纯手动部署记得在 `broker.env` 加一行 `ADMIN_TOKEN=<够长的随机串>`。
+云账号免费使用，账号通过邮箱验证且未被停用即可连接。停用账号不会停止本机任务，不影响有效 Token 的直连访问。找回密码或验证邮箱不能解除停用。
 
-## 免费使用与账号停用
-
-- 直连与云账号连接均免费，云端账号通过邮箱验证且未被停用即可使用，不检查会员或试用期限。
-- 管理员在用户列表点击“停用账号”，立即断开该账号的全部云连接，拒绝密码登录和旧令牌重连；修改密码或验证邮箱不能解除停用。
-- 点击“恢复账号”后允许重新登录，停用前的令牌仍失效。停用只影响云端访问，本机任务继续运行，本地 Token 直连不受影响。
-- 数据库自动增加 `disabled` 字段，旧账号默认正常。历史会员字段和兑换码记录保留但不再使用；相关收费接口与界面已经移除，`TRIAL_DAYS` 不再生效。
-- 更新 Broker 时同步更新网页、Agent 和 Expo 客户端；旧客户端仍可能因自身会员判断阻止连接。
-
-## 客户端怎么填
-
-- **网页**：访问 `https://broker.yourdomain.com`，云连接使用网页同源地址。
-- **手机 App**（云账号模式）：构建时设置 `mobile/src/config.js` 中的 `BROKER_URL`，WS 自动走 `wss://`。
-- **PC Agent**：启动前设置环境变量 `CODEXAPP_BROKER=https://broker.yourdomain.com`。当前代码不读取配置文件中的 `brokerUrl`。
-
-### 多账号、多手机升级
-
-每个账号最多一台在线 Agent，同账号多个手机可同时连接；不同账号由 Broker 独立路由。先更新 Broker，再更新 Agent，旧安装包须重新构建。相同账号的第二台 Agent 会被拒绝，不会挤掉第一台；切换电脑须先退出原 Agent。电脑面板显示在线与已授权的客户端连接数，管理后台显示每账号的客户端连接数。
-
-登录同一账号只负责找到 Agent。默认免码模式直接授权；在电脑面板切换为配对码模式后，每台新手机需输入该电脑显示的配对码，成功后保存手机公钥。已有配对记录继续有效。手机通信协议保持兼容，但取消会员机制需要同步更新客户端，详见 [多账号与多手机](README.md#多账号与多手机)。
-
-专项验证使用 `node --test tests/cloudMultiPhone.test.mjs tests/cloudMultiPhone.integration.mjs`，不操作生产账号或真实模型任务。
-
-新版还支持同设备签名重连、账号登录版本撤销，以及本机直连与云端共享一个核心。升级需要同时包含 `cloud/deviceIdentity.mjs`、新版 `db.mjs` 和本机 `relay/transport.mjs` 等依赖，不能只覆盖两个入口文件。数据库会自动增加 `auth_version`。详细行为、数据目录选择和升级顺序见 [连接与会话优化](../docs/连接与会话优化.md)。
+后台保存的 SMTP 设置优先于环境变量。未配置 SMTP 时，验证和重置链接输出到服务器日志；可使用后台手动验证完成账号开通。
 
 ## 环境变量
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `HOST` | `0.0.0.0` | 监听地址（Caddy 模式设 `127.0.0.1`） |
-| `PORT` | `8787` | 端口 |
-| `TLS_CERT` / `TLS_KEY` | 空 | PEM 路径；都设了才走 https/wss，否则 http/ws |
-| `PUBLIC_URL` | 自动推断 | 验证邮件里链接的域名，例 `https://broker.yourdomain.com`（Caddy 后建议显式设） |
-| `DB_PATH` | `cloud/codexapp.db` | SQLite 账号库路径 |
-| `ADMIN_TOKEN` | 空 | 设了才启用 `/admin` 管理后台；登录令牌 |
-| `SMTP_HOST` / `SMTP_PORT` | 空 | 发信服务器；**不设则验证链接只打到日志**（dev）。后台填的值会覆盖这里 |
-| `SMTP_USER` / `SMTP_PASS` | 空 | 发信认证 |
-| `SMTP_FROM` | = `SMTP_USER` | 发件人地址 |
-| `SMTP_FROM_NAME` | 空 | 发件人显示名（后台「发件人名称」） |
+| 变量 | 用途 |
+|---|---|
+| `HOST` | 监听地址，默认 `0.0.0.0` |
+| `PORT` | 监听端口，默认 `8787` |
+| `PUBLIC_URL` | 外部访问地址，用于邮件链接 |
+| `DB_PATH` | SQLite 路径，默认 `cloud/codexapp.db` |
+| `ADMIN_TOKEN` | 管理后台令牌，未设置时后台接口不启用 |
+| `TLS_CERT` / `TLS_KEY` | HTTPS 证书与私钥的 PEM 路径 |
+| `SMTP_HOST` / `SMTP_PORT` | 邮件服务器地址与端口 |
+| `SMTP_USER` / `SMTP_PASS` | 邮件登录凭据 |
+| `SMTP_FROM` / `SMTP_FROM_NAME` | 发件人地址与显示名称 |
 
-示例（带发信）：
+## 服务维护
+
 ```bash
-HOST=127.0.0.1 PORT=8787 PUBLIC_URL=https://broker.yourdomain.com \
-  SMTP_HOST=smtp.sendgrid.net SMTP_PORT=587 SMTP_USER=apikey SMTP_PASS=*** \
-  SMTP_FROM="CodexApp <no-reply@yourdomain.com>" node cloud/broker.mjs
+journalctl -u codexapp-broker -n 50 --no-pager
+sudo systemctl restart codexapp-broker
+sudo systemctl stop codexapp-broker
 ```
 
-## 生产清单（重要）
+修改代码或部署网页后，运行 `npm run build:web`，重启 Broker 并刷新客户端页面。推送 GitHub 不会自动执行这些操作。
 
-- **配 SMTP**（否则验证邮件发不出去，用户无法激活）。最省事:进 `/admin` → SMTP 设置 填写(即时生效)。本地不配时验证链接会打到 Broker 日志，仅供测试。
-- **设 `ADMIN_TOKEN`** 并妥善保管(一键部署已自动随机生成);它能进后台改 SMTP、删用户。
-- 账号库已是 **SQLite + JWT（带过期）+ 邮箱验证 + 登录限流**。备份 `codexapp.db` 和 `broker.secret`。
-- 防火墙只放行 443（和 SSH）。
-- Broker 看不到用户内容（端到端加密），但它是配对路由点——保证它本身不被入侵。
-- 找回密码已就绪：登录页「忘记密码」→ 邮件链接 → `/reset` 设新密码（链接 1 小时有效，配 SMTP 才发得出；未配则链接打到日志）。
-- 账号及停用状态保存在 `codexapp.db` 中。找回密码不会解除账号停用，恢复操作只能由管理员执行。
-- 仍待接入：APNs 推送（审批提醒）。
-
-> 配对码模式通过 SAS 绑定双方公钥；默认免码模式依赖账号认证。网页由 Broker 发布，业务消息加密不能替代对网页代码来源的信任。详见 [安全模型](README.md#安全模型)。
+备份应包含 `DB_PATH` 指向的数据库、`cloud/broker.secret` 和 `/etc/codexapp/broker.env`。复制数据库文件前停止 Broker，备份完成后再启动；恢复时使用同一份签名密钥及环境配置。
