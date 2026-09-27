@@ -28,7 +28,7 @@ export async function collectPages(client, method, params) {
   return data;
 }
 
-export function buildProjectTree(threads, gs = {}) {
+export function buildProjectTree(threads, gs = {}, { includeChildren = false } = {}) {
   const local = gs["local-projects"] || {};
   const labels = gs["electron-workspace-root-labels"] || {};
   const assignments = gs["thread-project-assignments"] || {};
@@ -54,7 +54,7 @@ export function buildProjectTree(threads, gs = {}) {
   }
   const unique = new Map();
   for (const t of threads) {
-    if (!t.id || t.parentThreadId) continue;
+    if (!t.id || (t.parentThreadId && !includeChildren)) continue;
     const old = unique.get(t.id);
     if (!old || (t.updatedAt ?? 0) > (old.updatedAt ?? 0)) unique.set(t.id, t);
   }
@@ -62,7 +62,7 @@ export function buildProjectTree(threads, gs = {}) {
   for (const raw of unique.values()) {
     const t = { id: raw.id, name: raw.name || raw.preview || "(无标题)", cwd: raw.cwd || null, updatedAt: recency(raw), source: raw.source || null };
     const assignment = assignments[t.id];
-    const explicit = assignment?.projectKind === "local" ? byId.get(assignment.projectId) : null;
+    const explicit = byId.get(raw.projectId) || (assignment?.projectKind === "local" ? byId.get(assignment.projectId) : null);
     if (explicit) { explicit.threads.push(t); continue; }
     if (projectlessIds.has(t.id)) { flat.push(t); continue; }
     const cwd = normalizeRoot(hints[t.id] || t.cwd);
@@ -85,14 +85,40 @@ export function buildProjectTree(threads, gs = {}) {
   return { projects, projectless: flat };
 }
 
-export async function listProjectTree(client, codexHome) {
+export async function listProjectTree(client, codexHome, options = {}) {
   let gs = {};
   try { gs = JSON.parse(fs.readFileSync(path.join(codexHome, ".codex-global-state.json"), "utf8")); }
   catch (error) { if (error.code !== "ENOENT") console.warn("[tree] global-state:", error.message); }
   const params = { limit: 200, sortKey: "recency_at", modelProviders: [], archived: false };
-  let threads = await collectPages(client, "thread/list", { ...params, useStateDbOnly: true });
-  if (!threads.length) threads = await collectPages(client, "thread/list", params);
-  return buildProjectTree(threads, gs);
+  let threads;
+  if (options.includeArchived) {
+    const sourceKinds = ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"];
+    threads = await collectPages(client, "thread/list", { ...params, sourceKinds });
+    threads.push(...await collectPages(client, "thread/list", { ...params, sourceKinds, archived: true }));
+  } else {
+    threads = await collectPages(client, "thread/list", { ...params, useStateDbOnly: true });
+    if (!threads.length) threads = await collectPages(client, "thread/list", params);
+  }
+  let projectDeletion = false;
+  try {
+    const projects = await collectPages(client, "project/list", { limit: 200 });
+    if (projects.some(p => !p.id || !Array.isArray(p.roots))) throw new Error("项目列表格式无效");
+    const aliases = new Map();
+    for (const mapping of Object.values(gs["app-server-project-id-by-legacy-project-id-by-host"] || {})) {
+      for (const [old, id] of Object.entries(mapping)) if (projects.some(p => p.id === id)) aliases.set(old, id);
+    }
+    for (const [old, entry] of Object.entries(gs["local-projects"] || {})) {
+      const matches = projects.filter(p => p.roots.some(r => entry.rootPaths?.some(root => normalizeRoot(root) === normalizeRoot(r.path))));
+      if (matches.length === 1 && !aliases.has(old)) aliases.set(old, matches[0].id);
+    }
+    gs = { ...gs, "local-projects": Object.fromEntries(projects.map(p => [p.id, { name: p.name, rootPaths: p.roots.map(r => r.path) }])),
+      "project-order": projects.map(p => p.id), "electron-saved-workspace-roots": [],
+      "thread-project-assignments": Object.fromEntries(Object.entries(gs["thread-project-assignments"] || {}).map(([id, a]) => [id, { ...a, projectId: aliases.get(a.projectId) || a.projectId }])) };
+    projectDeletion = true;
+  } catch (error) {
+    if (options.requireProjects) throw new Error("无法读取 Codex 项目记录，未执行删除；请确认 Codex 支持 project/list：" + error.message);
+  }
+  return { ...buildProjectTree(threads, gs, options), projectDeletion, ...(options.includeArchived ? { allThreads: threads } : {}) };
 }
 
 function toolResultText(result) {

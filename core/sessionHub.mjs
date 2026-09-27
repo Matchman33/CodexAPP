@@ -9,6 +9,7 @@ import { restartIdleCodex } from "./threadLifecycle.mjs";
 import { QUEUE_LIMITS } from "./promptQueue.mjs";
 import { IMAGE_LIMITS } from "./imageInput.mjs";
 import { TerminalManager } from "./terminalManager.mjs";
+import { deleteProject } from "./projectDeletion.mjs";
 
 export function atomicJson(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -142,6 +143,7 @@ export class SessionHub {
     if (m.historyMode === "paged") this.pagedClients.add(clientId);
     const read = ["historyPage", "readHistoryItem", "readAttachment", "watchThread"].includes(m.type) || m.type.startsWith("terminal");
     const execute = () => this.context.run({ clientId }, async () => {
+      if (this.deletingProject && !["getState", "listThreads", "watchThread", "historyPage", "readHistoryItem", "readAttachment", "terminalList"].includes(m.type)) throw new Error("正在删除项目，请等待完成后再操作");
       const counted = !read && !["restartService", "cancelRestart"].includes(m.type);
       if (counted) this.activeCommands = (this.activeCommands || 0) + 1;
       try { return await this.command(m, clientId); }
@@ -195,6 +197,16 @@ export class SessionHub {
   }
   async command(m, clientId) {
     const reply = msg => this.emit({ ...msg, clientId });
+    if (m.type === "deleteProject") {
+      if (this.activeCommands > 1 || this.restart.phase !== "idle") throw new Error("其他操作尚未完成，请稍后删除项目");
+      this.deletingProject = true;
+      try {
+        const result = await deleteProject(this, m, process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), status => reply({ type: "projectDeleteProgress", ...status, requestId: m.requestId }));
+        this.emit({ ...result, requestId: undefined }); reply(result);
+        await this.command({ type: "listThreads" }, clientId);
+      } finally { this.deletingProject = false; }
+      return;
+    }
     if (m.type.startsWith("terminal")) {
       const respond = result => reply({ ...result, requestId: m.requestId });
       switch (m.type) {

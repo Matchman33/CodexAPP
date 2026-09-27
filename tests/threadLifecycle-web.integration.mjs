@@ -84,7 +84,28 @@ try {
   assert.equal(await page.locator('.session-item[data-thread-id="one"], .session-item[data-thread-id="child"]').count(), 0);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ width: 390, passed: "release confirmation, actual child reconnect, relay stays alive, drafts/history, refresh, delete confirmation/cancel/failure/success/descendants, active guard", realTasksModified: 0 }));
+  await page.locator('.session-item[data-thread-id="project-one"]').click();
+  await page.waitForFunction(() => appState.threadId === "project-one" && !pendingSelection);
+  await page.locator("#sessionsBtn").click();
+  await page.locator("#sessionSearch").fill("项目显示会话");
+  await page.getByRole("button", {name:"删除项目：测试项目",exact:true}).click();
+  assert.match(await page.locator("#threadActionMessage").textContent(), /归档.*搜索筛选.*文件会保留/);
+  await fs.mkdir("dist-check/project-delete", {recursive:true});
+  await page.screenshot({path:"dist-check/project-delete/confirm-mobile.png"});
+  await page.locator("#threadActionCancel").click();
+  assert(!(await readCalls()).some(c => c.method === "project/delete"));
+  await page.getByRole("button", {name:"删除项目：测试项目",exact:true}).click();
+  await page.locator("#threadActionConfirm").click();
+  await page.waitForFunction(() => !threadActionPending && !lastProjectTree.projects.some(p => p.id === "project"));
+  assert.equal(await page.evaluate(() => appState.threadId), null);
+  const projectDeletes=(await readCalls()).filter(c=>c.method === "thread/delete" && c.params.threadId.startsWith("project-"));
+  assert.deepEqual(projectDeletes.map(c=>c.params.threadId).sort(),["project-archived","project-hidden","project-one"]);
+  await page.reload(); await page.waitForFunction(() => sessionReady);
+  await page.locator("#sessionsBtn").click();
+  await page.waitForFunction(() => lastProjectTree !== null);
+  assert.equal(await page.getByRole("button", {name:"删除项目：测试项目",exact:true}).count(),0);
+  assert.deepEqual(errors, []);
+  console.log(JSON.stringify({ width: 390, passed: "thread lifecycle and project cascade deletion, archived and search-hidden sessions, confirmation, cancellation, refreshed project list", realTasksModified: 0 }));
 } finally {
   if (browser) await browser.close();
   if (child && child.exitCode === null) { child.kill(); await once(child, "exit"); }

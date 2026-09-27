@@ -120,6 +120,7 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 | type | 字段 | 说明 |
 |---|---|---|
 | `deleteThread` | `threadId`, `confirmed:true`, `requestId` | 永久删除会话和派生子会话，客户端必须先显示名称与不可恢复确认 |
+| `deleteProject` | `projectId`, `confirmed:true`, `requestId` | 删除项目全部会话（含归档和派生会话），再移除项目记录；保留项目目录与文件 |
 | `releaseThread` | `threadId`, `requestId` | 暂停等待队列，取消当前中继订阅并确认卸载；必须明确匹配当前会话 ID |
 | `threadDeleted` | `threadId`, `requestId?` | 删除已确认；后代删除也单独广播。重复通知按 ID 幂等处理 |
 | `threadReleased` | `threadId`, `writerReleased`, `requestId` | 当前中继已确认释放；不代表其他独立进程也释放了它们的占用 |
@@ -127,6 +128,10 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 `state.threadAction` 在操作期间为 `delete` 或 `release`，完成后清空。客户端在操作期间禁用发送、切换、队列继续和相关设置，收到与 `requestId` 对应的错误时保留页面并允许人工重试。删除成功后清理相关历史页、流式状态、等待队列和列表项，并忽略迟到的旧会话响应。前端不自动重试超时的删除请求。
 
 `state.writerReleased:true` 表示当前中继已确认目标未加载；会话仍可保留在只读页面。发送或接续后重置此字段。释放前检查当前无活动任务或审批，取消订阅后重置权限同步状态，防止权限同步重新获取写入占用。队列保留且暂停；删除会话则移除对应等待条目但保留有限受理凭据，避免迟到的入队重试重复执行。
+
+`projectTree.projectDeletion:true` 表示 Codex 返回了有效的 `project/list`，项目 ID 可用于 `deleteProject`。服务端重新枚举全部分页、归档和派生会话，检查空闲状态，暂停相关队列，通过 `thread/delete` 删除后再调用 `project/delete`。不读取客户端传来的会话清单。删除期间阻止本中继新的变更操作，外部进程新增或残留的项目会话会在项目记录删除前再次检查；此流程不是跨进程事务。
+
+每完成一个会话发送 `projectDeleteProgress {requestId,deleted,total}`；成功广播 `projectDeleted {projectId,threadIds}` 并向发起客户端返回带 `requestId` 的同名响应。已有 `threadDeleted` 通知照常清理其他客户端的标签、历史及附件登记。部分失败用原有 `error` 返回已删除数量，保留项目记录和剩余暂停队列。项目目录与磁盘文件始终保留。
 
 主动释放通过 `thread/unsubscribe` 和 `thread/loaded/list` 确认。若 Codex 宽限期仍保留目标，只在已加载会话都确认空闲时重连本应用独占的 app-server 子进程；不结束其他进程，不删除写入锁文件。多会话切换不取消后台订阅，刷新网页也不会释放正在运行的任务。
 

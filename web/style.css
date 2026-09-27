@@ -22,6 +22,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 button { color: var(--text); }
 svg { display: block; width: 20px; height: 20px; flex: 0 0 auto; }
 .hidden { display: none !important; }
+.session-group { position: relative; }
+.session-group:has(.project-delete) { padding-right: 42px; }
+.project-delete { position: absolute; right: 0; top: 12px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }

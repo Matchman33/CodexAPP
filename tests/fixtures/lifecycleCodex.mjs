@@ -5,6 +5,7 @@ import readline from "node:readline";
 if (process.argv[1]?.endsWith("app-server")) {
   const stored = "threads.json";
   const initial = ["one", "two", "child", "busy"].map(id => ({ id, name: ({ one: "需要交接的会话", two: "待删除的会话", child: "派生子会话", busy: "外部运行中的会话" })[id], cwd: "/fixture", status: { type: id === "busy" ? "active" : "idle" }, turns: [], updatedAt: 100 }));
+  for (const [id,name,archived] of [["project-one","项目显示会话",false],["project-hidden","项目隐藏会话",false],["project-archived","项目归档会话",true]]) initial.push({id,name,archived,projectId:"project",cwd:"/project-fixture",status:{type:"idle"},turns:[],updatedAt:100});
   if (!fs.existsSync(stored)) fs.writeFileSync(stored, JSON.stringify(initial));
   const threads = new Map(JSON.parse(fs.readFileSync(stored, "utf8")).map(t => [t.id, t]));
   const loaded = new Set();
@@ -20,7 +21,9 @@ if (process.argv[1]?.endsWith("app-server")) {
         case "initialize": result = { userAgent: "lifecycle-fixture" }; break;
         case "config/read": result = { config: { model: "fixture-model" } }; break;
         case "model/list": result = { data: [{ model: "fixture-model", isDefault: true }], nextCursor: null }; break;
-        case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
+        case "thread/list": result = { data: [...threads.values()].filter(t => !!t.archived === !!p.archived), nextCursor: null }; break;
+        case "project/list": result = { data: fs.existsSync("project-deleted") ? [] : [{id:"project",name:"测试项目",roots:[{path:"/project-fixture"}]}], nextCursor: null }; break;
+        case "project/delete": if(p.projectId !== "project") throw new Error("unknown project"); fs.writeFileSync("project-deleted", "true"); break;
         case "thread/read":
         case "thread/resume": {
           const thread = threads.get(p.threadId); if (!thread) throw new Error("not found");

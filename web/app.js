@@ -554,7 +554,7 @@ function scheduleReconnect(label = "连接已断开，正在重试") {
 function sendWs(obj) {
   if (multiSession) {
     obj = { ...obj, clientId: sessionClientId };
-    if (!["newThread", "listThreads", "restartService", "cancelRestart"].includes(obj.type) && !Object.hasOwn(obj, "threadId") && appState.threadId) obj.threadId = appState.threadId;
+    if (!["newThread", "listThreads", "deleteProject", "restartService", "cancelRestart"].includes(obj.type) && !Object.hasOwn(obj, "threadId") && appState.threadId) obj.threadId = appState.threadId;
   }
   if (["newThread", "getState"].includes(obj.type)) obj = { ...obj, historyMode: "paged" };
   if (!sessionReady || !ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -813,6 +813,18 @@ function handle(m) {
       break;
     case "projectTree":
       renderProjectTree(m);
+      break;
+    case "projectDeleteProgress":
+      if (m.requestId === threadActionPending?.requestId) {
+        clearTimeout(threadActionTimer);
+        $("threadActionError").textContent = "已删除 " + m.deleted + "/" + m.total + " 个会话…";
+        threadActionTimer = setTimeout(() => finishThreadAction("删除结果尚未确认，请刷新列表核对"), 300000);
+      }
+      break;
+    case "projectDeleted":
+      for (const id of m.threadIds || []) forgetDeletedThread(id);
+      if (lastProjectTree) renderProjectTree({ ...lastProjectTree, projects: lastProjectTree.projects.filter(p => p.id !== m.projectId) });
+      if (m.requestId && m.requestId === threadActionPending?.requestId) { $("threadActionStatus").textContent = "项目及其会话已删除"; finishThreadAction(); }
       break;
     case "attachmentChunk":
       fileDownloads.receive(m);
@@ -1278,7 +1290,7 @@ function updateComposer() {
   $("quickNewThread").disabled = $("sidebarNewThread").disabled = (!multiSession && appState.status === "running") || !connected || managing;
   $("releaseThreadBtn").disabled = !threadManagement.release || !appState.threadId || !connected || appState.status === "running" || !!pendingSelection || !!pendingPrompt || managing || appState.writerReleased === true;
   document.querySelectorAll(".session-delete").forEach(button => { button.disabled = !threadManagement.delete || !connected || appState.status === "running" || !!pendingSelection || !!pendingPrompt || managing; });
-  $("threadActionConfirm").disabled = !connected || managing || appState.status === "running" || !!pendingPrompt || !!pendingSelection;
+  $("threadActionConfirm").disabled = !connected || managing || (appState.status === "running" && threadActionChoice?.type !== "deleteProject") || !!pendingPrompt || !!pendingSelection;
   updateSettingsButtons();
 }
 input.addEventListener("input", () => {
@@ -1599,6 +1611,11 @@ function renderProjectTree(tree) {
     header.innerHTML =
       `<div class="sg-name"><i data-lucide="folder"></i>${escapeHtml(p.label)} <span class="sg-count">${p.threads.length}</span></div>` +
       `<div class="sg-path mono">${escapeHtml(p.root)}</div>`;
+    const remove = document.createElement("button"); remove.className = "icon-btn project-delete";
+    remove.setAttribute("aria-label", "删除项目：" + p.label); remove.title = tree.projectDeletion ? "删除项目及全部会话" : "当前 Codex 不支持删除项目";
+    remove.disabled = !tree.projectDeletion; remove.innerHTML = '<i data-lucide="trash-2"></i>';
+    remove.onclick = () => openProjectDelete(p);
+    header.appendChild(remove);
     list.appendChild(header);
     if (!p.threads.length) {
       const empty = document.createElement("div");
@@ -1635,6 +1652,15 @@ function openThreadAction(type, threadId, name) {
   $("threadActionConfirm").className = "btn " + (deleting ? "danger" : "primary");
   updateComposer(); $("threadActionDialog").showModal(); $("threadActionCancel").focus();
 }
+function openProjectDelete(project) {
+  if (threadActionPending || appState.threadAction) return;
+  openThreadAction("deleteThread", null, project.label);
+  threadActionChoice = { type: "deleteProject", projectId: project.id };
+  $("threadActionTitle").textContent = "删除项目及全部会话";
+  $("threadActionName").textContent = project.label + " · " + project.root;
+  $("threadActionMessage").textContent = "将永久删除此项目的全部会话，包括归档和派生子会话，并取消相关等待队列。搜索筛选不影响删除范围。电脑上的项目目录和文件会保留。此操作无法撤销。";
+  updateComposer();
+}
 $("releaseThreadBtn").onclick = () => openThreadAction("releaseThread", appState.threadId, appState.threadName);
 $("threadActionCancel").onclick = () => $("threadActionDialog").close();
 $("threadActionDialog").addEventListener("cancel", event => { if (threadActionPending) event.preventDefault(); });
@@ -1644,7 +1670,7 @@ $("threadActionConfirm").onclick = () => {
   if (!sendWs(message)) { $("threadActionError").textContent = "连接已断开，请重连后重试"; return; }
   threadActionPending = message; $("threadActionCancel").disabled = true;
   $("threadActionError").textContent = "处理中…";
-  threadActionTimer = setTimeout(() => finishThreadAction("确认超时，操作结果尚未确定。请刷新会话列表核对，不会自动重试。"), 30000);
+  threadActionTimer = setTimeout(() => finishThreadAction("确认超时，操作结果尚未确定。请刷新会话列表核对，不会自动重试。"), message.type === "deleteProject" ? 300000 : 30000);
   updateComposer();
 };
 function finishThreadAction(error) {
@@ -1654,6 +1680,8 @@ function finishThreadAction(error) {
   updateComposer();
 }
 function forgetDeletedThread(threadId) {
+  sessionViews.delete(threadId); unreadSessions.delete(threadId); closedTabs.delete(threadId);
+  sessionSummaries = sessionSummaries.filter(s => s.threadId !== threadId);
   if (fileDownloads.active?.file.threadId === threadId) fileDownloads.cancel("会话已删除，下载已取消");
   if (fileDownloads.cached?.file.threadId === threadId) fileDownloads.clearCached();
   if (fileDownloads.textPreview?.file.threadId === threadId) $("textPreviewDialog").close();
@@ -1665,12 +1693,14 @@ function forgetDeletedThread(threadId) {
     for (const request of itemRequests.values()) clearTimeout(request.timer);
     itemRequests.clear(); pageCache.clear(); recentOverlay.clear(); historyPages = [];
     historyFeed.replace([], true); liveAssistant = null; pagedHistory = false;
-    appState = { ...appState, threadId: null, turnId: null, threadName: null, status: "idle", readOnly: false, writerReleased: false };
+    sessionStorage.removeItem(viewKey());
+    appState = { ...appState, threadId: null, turnId: null, threadName: null, cwd: "", status: "idle", readOnly: false, writerReleased: false };
     promptQueueState = null; setDiff(""); $("approvals").replaceChildren();
     applyState(); renderPromptQueue(); updateHistoryControls();
   }
   if (pendingPrompt?.threadId === threadId) { clearTimeout(promptTimer); pendingPrompt = null; }
   if (lastProjectTree) renderProjectTree(lastProjectTree);
+  renderSessionTabs();
   updateComposer();
 }
 

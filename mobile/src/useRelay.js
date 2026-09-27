@@ -28,6 +28,7 @@ export function useRelay(profile, keypair) {
   const cloud = profile?.mode === "cloud";
   const [conn, setConn] = useState("connecting"); // connecting|open|unauthorized|closed
   const [relayState, setRelayState] = useState({});
+  const currentThreadRef = useRef(null); currentThreadRef.current = relayState.threadId;
   const [models, setModels] = useState({ models: [], defaultModel: null, loading: false, error: "" });
   const [writerConflict, setWriterConflict] = useState(null);
   const [writerBusy, setWriterBusy] = useState(false);
@@ -83,6 +84,7 @@ export function useRelay(profile, keypair) {
         setDiff(m.diff || "");
         break;
       case "state":
+        if (currentThreadRef.current && !m.state?.threadId) { setEvents([]); setApprovals([]); setDiff(""); }
         setRelayState(m.state || {});
         if (m.state) setConfig((c) => ({ ...c, cwd: m.state.cwd, approvalPolicy: m.state.approvalPolicy, sandbox: m.state.sandbox, model: m.state.model ?? null, reasoningEffort: m.state.reasoningEffort ?? null }));
         break;
@@ -100,7 +102,15 @@ export function useRelay(profile, keypair) {
         break;
       }
       case "diff": setDiff(m.diff || ""); break;
-      case "projectTree": setTree({ projects: m.projects || [], projectless: m.projectless || [] }); break;
+      case "projectTree": setTree({ projects: m.projects || [], projectless: m.projectless || [], projectDeletion: !!m.projectDeletion }); break;
+      case "projectDeleted": {
+        setTree(tree => ({ ...tree, projects: tree.projects.filter(p => p.id !== m.projectId) }));
+        setRelayState(state => { if (!m.threadIds?.includes(state.threadId)) return state; return { ...state, threadId: null, cwd: "", status: "idle" }; });
+        if (m.threadIds?.includes(currentThreadRef.current)) { setEvents([]); setApprovals([]); setDiff(""); }
+        const pending = configRequests.current.get(m.requestId);
+        if (pending) { clearTimeout(pending.timer); configRequests.current.delete(m.requestId); pending.resolve(); }
+        break;
+      }
       case "event":
         pushEvents((prev) => {
           const existing = prev.findIndex((e) => e.id === m.event.id);
@@ -296,6 +306,14 @@ export function useRelay(profile, keypair) {
   }, [keypair]);
 
   const actions = {
+    deleteProject: projectId => new Promise((resolve, reject) => {
+      const requestId = "project-delete-" + Date.now();
+      const timer = setTimeout(() => { configRequests.current.delete(requestId); reject(new Error("删除结果未确认，请刷新列表核对")); }, 300000);
+      configRequests.current.set(requestId, { resolve, reject, timer });
+      if (!send({ type: "deleteProject", projectId, confirmed: true, requestId })) {
+        clearTimeout(timer); configRequests.current.delete(requestId); reject(new Error("连接已断开，未发送删除请求"));
+      }
+    }),
     prompt: (text, cwd) => send({ type: "prompt", text, cwd }),
     steer: (text) => send({ type: "steer", text }),
     interrupt: () => send({ type: "interrupt" }),

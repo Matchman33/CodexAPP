@@ -1,10 +1,18 @@
 import { useState } from "react";
-import { Modal, View, Text, TextInput, Pressable, ScrollView, StyleSheet, SafeAreaView } from "react-native";
+import { Modal, View, Text, TextInput, Pressable, ScrollView, StyleSheet, SafeAreaView, Alert } from "react-native";
 import Feather from "@expo/vector-icons/Feather";
 import { C } from "./theme";
 
-export default function SessionsModal({ visible, tree, activeThreadId, onResume, onRefresh, onNewThread, onSettings, onClose }) {
+export default function SessionsModal({ visible, tree, activeThreadId, onResume, onRefresh, onNewThread, onSettings, onClose, onDeleteProject }) {
   const [query, setQuery] = useState("");
+  const [deleting, setDeleting] = useState(null), [error, setError] = useState("");
+  const remove = project => Alert.alert("删除项目及全部会话", project.label + "\n" + project.root + "\n将永久删除全部会话（含归档和派生会话），不受搜索筛选影响。电脑项目文件保留。", [
+    { text: "取消", style: "cancel" },
+    { text: "删除", style: "destructive", onPress: async () => {
+      setDeleting(project.id); setError("");
+      try { await onDeleteProject(project.id); onRefresh(); } catch (e) { setError(e.message); } finally { setDeleting(null); }
+    } },
+  ]);
   const search = query.trim().toLowerCase();
   const matches = (t) => !search || (t.name || "").toLowerCase().includes(search);
   const projects = (tree?.projects || []).map((p) => ({ ...p, threads: p.label.toLowerCase().includes(search) ? p.threads : p.threads.filter(matches) })).filter((p) => !search || p.threads.length);
@@ -17,8 +25,10 @@ export default function SessionsModal({ visible, tree, activeThreadId, onResume,
         <Pressable style={s.command} onPress={onNewThread}><Feather name="edit" size={20} color={C.text} /><Text style={s.name}>新对话</Text></Pressable>
         <View style={s.search}><Feather name="search" size={17} color={C.muted} /><TextInput style={s.input} accessibilityLabel="搜索对话" value={query} onChangeText={setQuery} placeholder="搜索对话" placeholderTextColor={C.muted} /></View>
         <ScrollView style={s.list}>
+          {!!error && <Text accessibilityRole="alert" style={[s.hint, { color: C.danger }]}>{error}</Text>}
+          {!!deleting && <Text style={s.hint}>正在删除项目及会话…</Text>}
           {!projects.length && !projectless.length && <Text style={s.hint}>{search ? "没有匹配的对话" : "没有会话"}</Text>}
-          {projects.map((p) => <View key={p.id || p.root}><View style={s.group}><Feather name="folder" size={14} color={C.muted} /><Text style={s.groupName} numberOfLines={1}>{p.label}  {p.threads.length}</Text></View>{!p.threads.length && <Text style={s.hint}>暂无对话</Text>}{p.threads.map(item)}</View>)}
+          {projects.map((p) => <View key={p.id || p.root}><View style={s.group}><Feather name="folder" size={14} color={C.muted} /><Text style={[s.groupName, { flex: 1 }]} numberOfLines={1}>{p.label}  {p.threads.length}</Text>{tree.projectDeletion && onDeleteProject && <Pressable disabled={!!deleting} accessibilityRole="button" accessibilityLabel={"删除项目：" + p.label} onPress={() => remove(p)} style={s.icon}><Feather name="trash-2" size={17} color={C.muted} /></Pressable>}</View>{!p.threads.length && <Text style={s.hint}>暂无对话</Text>}{p.threads.map(item)}</View>)}
           {!!projectless.length && <View><View style={s.group}><Feather name="message-square" size={14} color={C.muted} /><Text style={s.groupName}>对话  {projectless.length}</Text></View>{projectless.map(item)}</View>}
         </ScrollView>
         <Pressable style={s.command} onPress={onSettings}><Feather name="sliders" size={20} color={C.text} /><Text style={s.name}>设置</Text></Pressable>

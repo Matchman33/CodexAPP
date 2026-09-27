@@ -203,6 +203,7 @@ export default function MainScreen({ relay, onForget }) {
         />
 
         <SessionsModal
+          onDeleteProject={actions.deleteProject}
           visible={showSessions}
           tree={tree}
           activeThreadId={relayState.threadId}
