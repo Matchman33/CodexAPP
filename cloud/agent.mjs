@@ -89,6 +89,7 @@ function loadPairing() {
 function savePairing() { fs.writeFileSync(PAIRING_FILE, JSON.stringify(pairing, null, 2)); }
 
 const config = loadConfig();
+const deviceName = (process.env.CODEXAPP_DEVICE_NAME || config.deviceName || os.hostname()).slice(0, 80);
 const sleepPrevention = createSleepPrevention(config);
 const keys = loadOrCreateKeyPair(KEYS_FILE);
 const deviceIdentity = loadDeviceIdentity(path.join(BASE, "agent.identity.json"));
@@ -109,6 +110,7 @@ const status = {
   fingerprint: fingerprint(keys.publicKey),
   pinnedCount: pairing.pinnedPhones.length,
   email: config.email || "",
+  deviceName,
   brokerUrl: CLOUD_BROKER,
   error: "",
 };
@@ -170,7 +172,7 @@ function connect(token) {
   socket.on("open", () => {
     if (ws !== socket || !running) { socket.close(); return; }
     backoff = 1000;
-    socket.send(JSON.stringify({ type: "auth", token, role: "agent", pubkey: keys.publicKey, multiPhone: true, deviceKey: deviceIdentity.publicKey }));
+    socket.send(JSON.stringify({ type: "auth", token, role: "agent", pubkey: keys.publicKey, multiPhone: true, deviceKey: deviceIdentity.publicKey, deviceName }));
   });
   socket.on("message", (raw) => {
     if (ws !== socket || !running || socket.readyState !== WebSocket.OPEN) return;
@@ -187,7 +189,7 @@ function connect(token) {
         setStatus({ phase: "error", error: "请先更新云端 Broker，启用多客户端和设备身份认证" });
         socket.close(); return;
       }
-      setStatus({ phase: m.peerOnline ? "connecting" : "waitingPeer", brokerConnected: true, error: "" });
+      setStatus({ phase: m.peerOnline ? "connecting" : "waitingPeer", brokerConnected: true, agentId: m.agentId, error: "" });
       console.log("[agent] linked. peerOnline=" + m.peerOnline);
       for (const peer of m.peers || []) phones.online(peer.phoneId, peer.pubkey).catch(error => setStatus({ error: error.message }));
       return;
@@ -442,6 +444,7 @@ input{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9p
       <div class="row"><span class="k"><span id="d_codex" class="dot"></span>本地 Codex</span><span id="v_codex" class="v">—</span></div>
       <div class="row"><span class="k"><span id="d_peer" class="dot"></span>客户端在线</span><span id="v_peer" class="v">—</span></div>
       <div class="row"><span class="k">账号</span><span id="v_email" class="v">—</span></div>
+      <div class="row"><span class="k">电脑名称</span><span id="v_device" class="v" style="max-width:70%;overflow-wrap:anywhere"></span></div>
       <div class="row"><span class="k">本机指纹</span><span id="v_fp" class="v">—</span></div>
       <div class="row"><span class="k">已配对设备</span><span id="v_pin" class="v">—</span></div>
     </div>
@@ -520,7 +523,7 @@ function render(s){
   $("d_broker").className="dot"+(s.brokerConnected?" on":"");$("v_broker").textContent=s.brokerConnected?"已连接":"未连接";
   $("d_codex").className="dot"+(s.codexConnected?" on":"");$("v_codex").textContent=s.codexConnected?"已就绪":"未就绪";
   $("d_peer").className="dot"+(s.peerOnline?" on":"");$("v_peer").textContent=s.peerOnline?(s.onlinePhones+" 个连接 / "+s.pairedPhones+" 个已授权"):"离线";
-  $("v_email").textContent=s.email||"—";$("v_fp").textContent=s.fingerprint||"—";$("v_pin").textContent=(s.pinnedCount||0)+" 台";
+  $("v_email").textContent=s.email||"—";$("v_device").textContent=s.deviceName||"—";$("v_fp").textContent=s.fingerprint||"—";$("v_pin").textContent=(s.pinnedCount||0)+" 台";
   $("perr").textContent=s.error?("⚠ "+s.error):"";
 }
 function poll(){fetch("/api/status").then(function(r){return r.json()}).then(render).catch(function(){});}

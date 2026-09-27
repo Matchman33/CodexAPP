@@ -215,9 +215,9 @@ async function handleAdmin(req, res) {
   if (G && p === "/api/admin/overview") {
     const online = [];
     for (const [aid, r] of rooms) {
-      if (!r.agent && !r.phones.size) continue;
+      if (!r.agents.size && !r.phones.size) continue;
       const acc = db.getById(aid);
-      online.push({ email: acc ? acc.email : aid.slice(0, 8), agent: !!r.agent, phone: !!r.phones.size, phoneCount: r.phones.size });
+      online.push({ email: acc ? acc.email : aid.slice(0, 8), agent: !!r.agents.size, agentCount: r.agents.size, agents: router.agents(r), phone: !!r.phones.size, phoneCount: r.phones.size });
     }
     const users = db.listAccounts(200).map((u) => ({ id: u.id, email: u.email, verified: !!u.email_verified, disabled: !!u.disabled, createdAt: u.created_at }));
     return res.end(JSON.stringify({ counts: db.counts(), online, users }));

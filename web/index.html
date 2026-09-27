@@ -75,6 +75,7 @@
       <h1>配对电脑端</h1>
       <p class="muted">把这台设备和你的电脑绑定一次，之后会自动连，不用再输。</p>
       <p id="pStatus" class="muted small"></p>
+      <label for="pairAgentSelect">电脑</label><select id="pairAgentSelect" aria-label="配对目标电脑"></select>
       <label>配对码</label>
       <input id="pCode" type="text" placeholder="例 FVBRQU" autocapitalize="characters" autocorrect="off" />
       <button id="pSubmit" class="btn primary big">配对</button>
@@ -93,6 +94,10 @@
       <button id="quickNewThread" class="icon-btn" aria-label="新建会话" title="新建会话"><i data-lucide="square-pen"></i></button>
       <button id="menuBtn" class="icon-btn" aria-label="设置" title="设置"><i data-lucide="ellipsis"></i></button>
     </header>
+    <div id="cloudDeviceBar" class="cloud-device-bar hidden">
+      <label for="cloudAgentSelect">电脑</label><select id="cloudAgentSelect" aria-label="选择电脑"></select>
+      <span id="cloudAgentStatus" class="muted small" role="status"></span>
+    </div>
     <div class="subbar">
       <span id="threadTitle">新对话</span><span id="cwdLabel" class="muted small mono"></span>
     </div>

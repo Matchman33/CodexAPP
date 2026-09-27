@@ -40,6 +40,9 @@ export function useRelay(profile, keypair) {
   const [agentFp, setAgentFp] = useState(null);
   const [paired, setPaired] = useState(false);
   const [pairError, setPairError] = useState("");
+  const [agents, setAgents] = useState([]), [agentId, setAgentId] = useState(null);
+  const [selectedTarget, setSelectedTarget] = useState(null);
+  const selectedAgentRef = useRef(null), authRef = useRef(null), generationRef = useRef(0);
 
   const wsRef = useRef(null);
   const configRequests = useRef(new Map());
@@ -143,40 +146,62 @@ export function useRelay(profile, keypair) {
 
   const connect = useCallback(async () => {
     if (!profile || authBlockedRef.current) return;
+    const generation = ++generationRef.current;
+    const previous = wsRef.current; wsRef.current = null;
+    try { previous?.close(); } catch {}
     setConn("connecting");
     agentPubRef.current = null; setAgentFp(null);
     let ws;
     try {
       if (cloud) {
-        const res = await fetch(stripSlash(profile.brokerUrl) + "/api/login", {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ email: profile.email, password: profile.password }),
-        });
-        if (res.status === 401) { authBlockedRef.current = true; setConn("unauthorized"); return; }
-        if (res.status === 403) {
-          const reason = await res.json().catch(() => ({}));
-          authBlockedRef.current = true;
-          setConn(reason.code === "account_disabled" ? "disabled" : "unauthorized"); return;
+        const authKey = JSON.stringify([profile.brokerUrl, profile.email, profile.password]);
+        let token = authRef.current?.key === authKey ? authRef.current.token : null;
+        if (!token) {
+          const res = await fetch(stripSlash(profile.brokerUrl) + "/api/login", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ email: profile.email, password: profile.password }),
+          });
+          if (generation !== generationRef.current || !aliveRef.current) return;
+          if (res.status === 429) { authBlockedRef.current = true; setConn("rateLimited"); return; }
+          if (res.status === 401) { authBlockedRef.current = true; setConn("unauthorized"); return; }
+          if (res.status === 403) {
+            const reason = await res.json().catch(() => ({}));
+            if (generation !== generationRef.current || !aliveRef.current) return;
+            authBlockedRef.current = true;
+            setConn(reason.code === "account_disabled" ? "disabled" : "unauthorized"); return;
+          }
+          if (!res.ok) { scheduleReconnect(connect); return; }
+          const data = await res.json();
+          if (generation !== generationRef.current || !aliveRef.current) return;
+          token = data.token; authRef.current = { key: authKey, token };
         }
-        if (!res.ok) { scheduleReconnect(connect); return; }
-        const data = await res.json();
-        const token = data.token;
         ws = new WebSocket(stripSlash(profile.brokerUrl).replace(/^http/, "ws") + "/link");
-        ws.onopen = () => { backoffRef.current = 1000; ws.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keypair.publicKey })); };
+        ws.onopen = () => { backoffRef.current = 1000; ws.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keypair.publicKey, multiAgent: true, agentId: selectedAgentRef.current })); };
       } else {
         ws = new WebSocket(stripSlash(profile.url).replace(/^http/, "ws") + "/ws?token=" + encodeURIComponent(profile.token));
         ws.onopen = () => { backoffRef.current = 1000; setConn("open"); };
       }
-    } catch { scheduleReconnect(connect); return; }
+    } catch { if (generation === generationRef.current && aliveRef.current) scheduleReconnect(connect); return; }
 
     wsRef.current = ws;
     ws.onmessage = (ev) => {
-      if (authBlockedRef.current || !aliveRef.current) return;
+      if (authBlockedRef.current || !aliveRef.current || wsRef.current !== ws) return;
       let m; try { m = JSON.parse(ev.data); } catch { return; }
       if (cloud) {
+        if ((m.type === "authed" && m.multiAgent) || m.type === "agents") {
+          setAgents(m.agents || []); selectedAgentRef.current = m.agentId || null; setAgentId(m.agentId || null);
+          if (m.type === "agents") return;
+        }
         if (m.type === "authed") { setConn("open"); if (m.peerOnline && m.peerPubkey) { agentPubRef.current = m.peerPubkey; setAgentFp(fingerprint(m.peerPubkey)); } return; }
-        if (m.type === "peer") { agentPubRef.current = m.online ? m.pubkey : null; setAgentFp(m.online ? fingerprint(m.pubkey) : null); if (!m.online) { setPaired(false); setRelayState((s) => ({ ...s, codexConnected: false })); } return; }
+        if (m.type === "peer") {
+          if (m.agentId && selectedAgentRef.current && m.agentId !== selectedAgentRef.current) return;
+          if (m.agentId) { selectedAgentRef.current = m.agentId; setAgentId(m.agentId); }
+          agentPubRef.current = m.online ? m.pubkey : null; setAgentFp(m.online ? fingerprint(m.pubkey) : null);
+          if (!m.online) { setPaired(false); setRelayState((s) => ({ ...s, codexConnected: false })); }
+          return;
+        }
         if (m.type === "e2e") {
+          if (m.agentId && m.agentId !== selectedAgentRef.current) return;
           const inner = open(m, agentPubRef.current, keypair.secretKey);
           if (!inner) return;
           // Agent online but this device isn't paired -> show the pairing screen (a step AFTER login).
@@ -192,6 +217,7 @@ export function useRelay(profile, keypair) {
         }
         if (m.type === "error") {
           if (m.code === "account_disabled" || m.code === "session_revoked" || /token/i.test(m.message || "")) {
+            authRef.current = null;
             authBlockedRef.current = true; setPaired(false); setRelayState(s => ({ ...s, codexConnected: false }));
             setConn(m.code === "account_disabled" ? "disabled" : "unauthorized");
             try { ws.close(); } catch {} return;
@@ -203,7 +229,7 @@ export function useRelay(profile, keypair) {
       handle(m);
     };
     ws.onclose = (e) => {
-      if (!aliveRef.current) return;
+      if (!aliveRef.current || wsRef.current !== ws) return;
       clearTimeout(writerTimer.current);
       if (writerRequest.current) { writerRequest.current = null; setWriterBusy(false); setWriterError("连接已断开，请重新检查占用状态"); }
       clearTimeout(modelsTimer.current);
@@ -226,13 +252,15 @@ export function useRelay(profile, keypair) {
     connect();
     return () => {
       aliveRef.current = false;
+      generationRef.current++;
       clearTimeout(timerRef.current); clearTimeout(modelsTimer.current);
       clearTimeout(writerTimer.current); writerRequest.current = null;
       for (const p of configRequests.current.values()) { clearTimeout(p.timer); p.reject(new Error("连接已关闭")); }
       configRequests.current.clear();
-      try { wsRef.current && wsRef.current.close(); } catch {}
+      const previous = wsRef.current; wsRef.current = null;
+      try { previous?.close(); } catch {}
     };
-  }, [profile, keypair]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [profile, keypair, selectedTarget]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const send = useCallback((obj) => {
     const ws = wsRef.current;
@@ -298,5 +326,6 @@ export function useRelay(profile, keypair) {
   };
 
   const connected = conn === "open" && (cloud ? (!!agentPubRef.current && paired && !!relayState.codexConnected) : !!relayState.codexConnected);
-  return { conn, connected, cloud, agentFp, relayState, config, models, writerConflict, writerBusy, writerError, events, approvals, diff, tree, actions, pair, pairError };
+  const selectAgent = id => { if (id !== selectedAgentRef.current && agents.some(agent => agent.id === id)) { selectedAgentRef.current = id; setAgentId(id); setSelectedTarget(id); } };
+  return { conn, connected, cloud, agents, agentId, selectAgent, agentFp, relayState, config, models, writerConflict, writerBusy, writerError, events, approvals, diff, tree, actions, pair, pairError };
 }

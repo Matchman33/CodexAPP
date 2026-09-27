@@ -71,7 +71,7 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
       return { ...credentials, id, token: loggedIn.token };
     };
     const a = await account("account-a"), b = await account("account-b");
-    const connectPhone = async (account, key = newKeyPair(), clientId) => {
+    const connectPhone = async (account, key = newKeyPair(), clientId, agentId = null) => {
       const ws = new WebSocket(base.replace("http", "ws") + "/link");
       sockets.push(ws);
       const phone = { ws, key, agentPub: null, raw: [], messages: [] };
@@ -86,7 +86,7 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
         }
       });
       await once(ws, "open");
-      ws.send(JSON.stringify({ type: "auth", role: "phone", pubkey: key.publicKey, token: account.token }));
+      ws.send(JSON.stringify({ type: "auth", role: "phone", pubkey: key.publicKey, token: account.token, multiAgent: true, agentId }));
       await until(() => phone.raw.some(m => m.type === "authed"));
       phone.send = message => ws.send(JSON.stringify({ type: "e2e", ...seal({ ...message, ...(clientId ? { clientId } : {}) }, phone.agentPub, key.secretKey) }));
       phone.pair = code => phone.send({ type: "pair", tag: sas(code, phone.agentPub, key.publicKey) });
@@ -102,7 +102,7 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
         codexBin: process.execPath, panelPort, relayPort: await freePort(), relayConfigPath: path.join(dir, "relay.json"), defaultCwd: dir, pairingMode: "code", preventSleep: false, terminalEnabled: false, model: "fixture" }));
       const child = launch(name === "agent-b" ? "bundle/agent.cjs" : "cloud/agent.mjs", dir, { CODEXAPP_DIR: dir, CODEXAPP_DATA_DIR: path.join(dir, "data"), CODEX_HOME: path.join(dir, "home"),
         CODEXAPP_BROKER: base, CODEXAPP_NO_OPEN: "1", CODEXAPP_PREVENT_SLEEP: "0", CODEXAPP_EMAIL: account.email, CODEXAPP_PASSWORD: account.password,
-        NODE_OPTIONS: "--import=" + pathToFileURL(path.resolve("tests/fixtures/restartCodex.mjs")).href });
+        CODEXAPP_DEVICE_NAME: name, NODE_OPTIONS: "--import=" + pathToFileURL(path.resolve("tests/fixtures/restartCodex.mjs")).href });
       const status = async () => { try { return await (await fetch("http://127.0.0.1:" + panelPort + "/api/status")).json(); } catch { return {}; } };
       await until(async () => (await status()).brokerConnected);
       return { child, dir, status, code: (await status()).pairingCode };
@@ -246,6 +246,27 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
       const response = await fetch(base + route, { method: "POST", headers: { "x-admin-token": admin, "content-type": "application/json" }, body: "{}" });
       assert.equal(response.status, 404, "旧收费接口已取消：" + route);
     }
+    const multi = await account("multi-agent");
+    const computerC = await agent(multi, "agent-c"), computerD = await agent(multi, "agent-d");
+    const idC = (await computerC.status()).agentId, idD = (await computerD.status()).agentId;
+    assert(idC && idD && idC !== idD);
+    const cPhone = await connectPhone(multi, undefined, "c-phone", idC), dPhone = await connectPhone(multi, undefined, "d-phone", idD);
+    await until(() => [cPhone, dPhone].every(phone => phone.messages.some(m => m.type === "needPairing")));
+    cPhone.pair(computerC.code); dPhone.pair(computerD.code);
+    await until(() => [cPhone, dPhone].every(phone => phone.messages.some(m => m.type === "hello")));
+    cPhone.send({ type: "readThread", threadId: "same", requestId: "only-c" });
+    dPhone.send({ type: "readThread", threadId: "same", requestId: "only-d" });
+    await until(() => cPhone.messages.some(m => m.requestId === "only-c") && dPhone.messages.some(m => m.requestId === "only-d"));
+    assert(!dPhone.messages.some(m => m.requestId === "only-c"));
+    assert(!cPhone.messages.some(m => m.requestId === "only-d"));
+    assert.equal((await computerC.status()).onlinePhones, 1); assert.equal((await computerD.status()).onlinePhones, 1);
+    const multiOverview = await (await fetch(base + "/api/admin/overview", { headers: { "x-admin-token": admin } })).json();
+    assert.equal(multiOverview.online.find(o => o.email === multi.email).agentCount, 2);
+    await post("/api/admin/user/revoke-sessions", { id: multi.id }, true);
+    await until(() => cPhone.ws.readyState === WebSocket.CLOSED && dPhone.ws.readyState === WebSocket.CLOSED);
+    await until(async () => (await computerC.status()).phase === "needLogin" && (await computerD.status()).phase === "needLogin");
+    assert.equal((await computerC.status()).codexConnected, true);
+    assert.equal((await computerD.status()).codexConnected, true);
     const limitedLogin = () => fetch(base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "rate-fixture@example.com", password: "wrong-password" }) });
     for (let i = 0; i < 8; i++) assert.equal((await limitedLogin()).status, 401);
     const limited = await limitedLogin();

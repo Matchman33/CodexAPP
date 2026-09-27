@@ -21,6 +21,7 @@ let reconnectTimer = null;
 let connectionTimer = null;
 let loginAbort = null;
 let cloudAuth = null;
+let cloudAgents = [], cloudAgentId = null, cloudMultiAgent = false;
 let connectionAttempt = 0;
 let connectionWanted = false;
 let sessionReady = false;
@@ -62,7 +63,7 @@ let historyEpoch = null;
 let sessionSummaries = [], watchRequest = null, watchAfter = 0, watchDelay = 2000;
 const sessionViews = new Map(), closedTabs = new Set();
 const unreadSessions = new Set(), sessionRevisions = new Map();
-function viewKey() { return "codexapp.open." + profile.mode + ":" + (profile.url || location.origin); }
+function viewKey() { return "codexapp.open." + profile.mode + ":" + (profile.url || location.origin) + (profile.mode === "cloud" ? ":" + profile.email + ":" + (cloudAgentId || "unselected") : ""); }
 function saveSessionView() {
   if (!multiSession || !appState.threadId) return;
   clearTimeout(promptTimer);
@@ -152,6 +153,11 @@ let writerPending = null;
 let writerTimer = null;
 let lastDiff = "";          // latest unified diff for the current turn
 let profile = loadProfile();
+try {
+  cloudAgentId = sessionStorage.getItem("codexapp.agent." + profile.email) || null;
+  const saved = JSON.parse(sessionStorage.getItem("codexapp.cloudAuth") || "null");
+  if (saved?.email === profile.email && saved.profile === localStorage.getItem(LS.profile)) cloudAuth = { email: profile.email, password: profile.password, token: saved.token };
+} catch {}
 let keys = loadKeys();      // E2E keypair (cloud mode)
 let agentPub = null;        // peer (agent) public key (cloud mode)
 let paired = false;
@@ -162,7 +168,14 @@ let paired = false;
 function loadProfile() {
   try { return JSON.parse(localStorage.getItem(LS.profile)) || {}; } catch { return {}; }
 }
-function saveProfile(p) { profile = p; localStorage.setItem(LS.profile, JSON.stringify(p)); }
+function saveProfile(p) {
+  if (p.email !== profile.email || p.password !== profile.password || p.mode !== profile.mode) {
+    cloudAuth = null; sessionStorage.removeItem("codexapp.cloudAuth");
+    cloudAgents = []; cloudAgentId = p.mode === "cloud" ? sessionStorage.getItem("codexapp.agent." + p.email) : null;
+    $("cloudDeviceBar").classList.add("hidden");
+  }
+  profile = p; localStorage.setItem(LS.profile, JSON.stringify(p));
+}
 function loadKeys() {
   try { const k = JSON.parse(localStorage.getItem(LS.keys)); if (k && k.publicKey) return k; } catch {}
   const k = window.E2E.newKeyPair();
@@ -235,6 +248,7 @@ function showPairing() {
 
 function loginFailed(msg, resend) {
   cloudAuth = null;
+  sessionStorage.removeItem("codexapp.cloudAuth");
   stopConnection();
   showSetup();
   switchTab("cloud");
@@ -443,17 +457,22 @@ async function connectCloud(attempt) {
   let socket;
   try { socket = ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/link"); }
   catch { scheduleReconnect(); return; }
-  socket.onopen = () => { if (attempt === connectionAttempt) socket.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keys.publicKey })); };
+  socket.onopen = () => { if (attempt === connectionAttempt) socket.send(JSON.stringify({ type: "auth", token, role: "phone", pubkey: keys.publicKey, multiAgent: true, agentId: cloudAgentId })); };
   socket.onmessage = (ev) => {
     if (attempt !== connectionAttempt) return;
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.type === "authed") {
       clearTimeout(connectionTimer); connectionTimer = null; backoff = 1000;
+      cloudMultiAgent = m.multiAgent === true;
+      if (cloudMultiAgent) updateCloudAgents(m);
       setConn(false, "等待电脑 Agent…");
       if (m.peerOnline && m.peerPubkey) { agentPub = m.peerPubkey; armConnectionTimeout(attempt); }
       return;
     }
+    if (m.type === "agents") { updateCloudAgents(m); return; }
     if (m.type === "peer") {
+      if (cloudMultiAgent && m.agentId && cloudAgentId && m.agentId !== cloudAgentId) return;
+      if (cloudMultiAgent && m.agentId) { cloudAgentId = m.agentId; sessionStorage.setItem("codexapp.agent." + profile.email, cloudAgentId); }
       agentPub = m.online ? m.pubkey : null;
       if (!m.online) {
         clearTimeout(connectionTimer); connectionTimer = null;
@@ -464,6 +483,7 @@ async function connectCloud(attempt) {
       return;
     }
     if (m.type === "e2e") {
+      if (cloudMultiAgent && m.agentId !== cloudAgentId) return;
       const inner = window.E2E.open(m, agentPub, keys.secretKey);
       if (!inner) return;
       if (inner.type === "needPairing") {
@@ -483,6 +503,7 @@ async function connectCloud(attempt) {
       return;
     }
     if (m.type === "error") {
+      if (["agent_selection_required", "invalid_agent"].includes(m.code)) { loginFailed(m.message); return; }
       if (m.code === "account_disabled") { loginFailed("账号已被管理员停用，请联系管理员"); return; }
       if (m.code === "session_revoked" || /token|invalid/i.test(m.message || "")) loginFailed("登录失效，请重新登录");
       return;
@@ -491,6 +512,35 @@ async function connectCloud(attempt) {
   socket.onclose = () => { if (attempt === connectionAttempt) scheduleReconnect(); };
   socket.onerror = () => { if (attempt === connectionAttempt) scheduleReconnect("网络连接失败，正在重试"); };
 }
+
+function updateCloudAgents(message) {
+  cloudAgents = message.agents || [];
+  cloudAgentId = message.agentId || null;
+  if (cloudAgentId) sessionStorage.setItem("codexapp.agent." + profile.email, cloudAgentId);
+  const selected = cloudAgents.find(agent => agent.id === cloudAgentId);
+  for (const id of ["cloudAgentSelect", "pairAgentSelect"]) {
+    const select = $(id); select.replaceChildren();
+    const placeholder = new Option(cloudAgentId ? "已选电脑离线 · " + cloudAgentId.slice(0, 8) : "选择电脑", cloudAgentId || "");
+    placeholder.disabled = true;
+    if (!selected) select.add(placeholder);
+    for (const agent of cloudAgents) select.add(new Option(agent.name + " · " + window.E2E.fingerprint(agent.pubkey), agent.id));
+    select.value = cloudAgentId || "";
+  }
+  $("cloudDeviceBar").classList.remove("hidden");
+  $("cloudAgentStatus").textContent = selected ? "在线" : cloudAgentId ? "离线" : cloudAgents.length ? "待选择" : "暂无在线电脑";
+}
+
+function switchCloudAgent(id) {
+  if (!id || id === cloudAgentId || !cloudAgents.some(agent => agent.id === id)) return;
+  const draft = $("input").value.trim() || attachments.items.length || pendingPrompt || pendingDirect || [...sessionViews.values()].some(view => view.text?.trim() || view.images?.length || view.pendingPrompt || view.pendingDirect);
+  if (draft && !confirm("切换电脑将清除当前页面未发送或尚未确认发送的草稿，是否继续？")) { updateCloudAgents({ agents: cloudAgents, agentId: cloudAgentId }); return; }
+  sessionStorage.setItem("codexapp.agent." + profile.email, id);
+  if (cloudAuth) sessionStorage.setItem("codexapp.cloudAuth", JSON.stringify({ email: profile.email, token: cloudAuth.token, profile: localStorage.getItem(LS.profile) }));
+  stopConnection();
+  location.reload();
+}
+$("cloudAgentSelect").onchange = event => switchCloudAgent(event.target.value);
+$("pairAgentSelect").onchange = event => switchCloudAgent(event.target.value);
 
 function scheduleReconnect(label = "连接已断开，正在重试") {
   if (!connectionWanted) return;
@@ -1476,6 +1526,7 @@ setInterval(() => {
 }, 1000);
 $("quickNewThread").onclick = $("sidebarNewThread").onclick = quickNewThread;
 function forget() {
+  sessionStorage.removeItem("codexapp.cloudAuth");
   localStorage.removeItem(LS.profile); // keep keys so the device stays paired
   location.reload();
 }

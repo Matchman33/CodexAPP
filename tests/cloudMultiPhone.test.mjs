@@ -42,7 +42,7 @@ test("不同账号隔离，同账号多手机定向收发且不能伪造路由�
   assert.equal(a.messages.at(-1).box, "still connected");
 });
 
-test("第二台 Agent 被拒绝，原路由保留；断线重连可发现所有手机", () => {
+test("无设备身份的旧 Agent 不能共存，原路由保留；断线重连可发现所有手机", () => {
   const router = new LinkRouter();
   const p = join(router, "a", "phone"), q = join(router, "a", "phone");
   const a = join(router, "a", "agent");
@@ -50,13 +50,13 @@ test("第二台 Agent 被拒绝，原路由保留；断线重连可发现所有�
   const duplicate = join(router, "a", "agent");
   assert.equal(duplicate.messages[0].code, "agent_already_online");
   router.leave(duplicate);
-  assert.equal(router.rooms.get("a").agent, a);
+  assert.equal(router.rooms.get("a").agents.get("legacy"), a);
   router.leave(a);
   assert.equal(p.messages.at(-1).online, false);
   const next = join(router, "a", "agent");
   assert.deepEqual(next.messages[0].peers.map(x => x.phoneId), [p.phoneId, q.phoneId]);
   router.leave(a);
-  assert.equal(router.rooms.get("a").agent, next);
+  assert.equal(router.rooms.get("a").agents.get("legacy"), next);
   router.disconnectAccount("a");
   assert.equal(router.rooms.size, 0);
   assert([next, p, q].every(ws => ws.closed?.code === 4001));

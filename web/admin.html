@@ -158,7 +158,7 @@ async function loadOverview() {
       `<div class="stat"><div class="n">${d.counts.disabled ?? 0}</div><div class="l">已停用账号</div></div>` +
       `<div class="stat"><div class="n">${d.online.length}</div><div class="l">在线账号</div></div>`;
     $("online").innerHTML = d.online.length
-      ? d.online.map((o) => `<div><span class="dot on"></span>${esc(o.email)} — 电脑端${o.agent ? "✓" : "✗"} / 客户端 ${o.phoneCount ?? (o.phone ? 1 : 0)} 个连接</div>`).join("")
+      ? d.online.map((o) => `<div><span class="dot on"></span>${esc(o.email)} — 电脑 ${o.agentCount ?? (o.agent ? 1 : 0)} 台 / 客户端 ${o.phoneCount ?? (o.phone ? 1 : 0)} 个连接</div>`).join("")
       : '<span class="muted">当前无在线连接</span>';
     $("users").innerHTML =
       `<table><thead><tr><th>邮箱</th><th>邮箱验证</th><th>账号状态</th><th>注册时间</th><th>操作</th></tr></thead><tbody>` +

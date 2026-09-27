@@ -36,6 +36,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent2); }
 .tab.on { background: var(--card); color: var(--text); box-shadow: 0 1px 3px #00000010; }
 .setup-card label, .sheet-card label { font-size: 13px; color: var(--muted); margin-top: 8px; }
 .app { display: flex; flex-direction: column; height: var(--app-height, 100dvh); }
+.cloud-device-bar { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--line); min-height: 48px; flex-shrink: 0; }
+.cloud-device-bar label { font-size: 13px; flex-shrink: 0; }
+.cloud-device-bar select { width: auto; flex: 1; max-width: 360px; padding: 6px 8px; font-size: 14px; }
+.cloud-device-bar [role="status"] { flex-shrink: 0; }
 .topbar { display: flex; gap: 4px; align-items: center; padding: max(env(safe-area-inset-top), 8px) 10px 8px; flex: 0 0 auto; min-height: 58px; z-index: 5; }
 .icon-btn { width: 40px; height: 40px; padding: 10px; border: 0; border-radius: 50%; background: transparent; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 40px; }
 .icon-btn:hover { background: var(--bg2); }

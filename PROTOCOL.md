@@ -183,6 +183,12 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 `hello.multiSession.supported:true` 表示支持多会话。直连在 WebSocket 查询中发送 `clientId`；云端在内层命令中发送 `clientId`。选择按客户端隔离；直连未提供标识时使用 `legacy` 选择，云 Agent 为各手机分配独立标识。命令可携带 `threadId` 明确目标；状态、事件、队列、审批和定向响应携带会话/客户端标识，前端不能将后台状态应用到当前页面。`sessions` 返回会话摘要列表，包含 `threadId/name/cwd/projectless/status/approvals/queued`。
 
+云端 `/link` 支持同账号多 Agent。Agent 在原有设备签名认证中附带可选 `deviceName`；Broker 根据已验证的 `deviceKey` 计算 SHA-256 十六进制 `agentId`，不接受 Agent 自报路由 ID。同一设备重连替换原连接，不影响其他设备；旧的无设备身份 Agent 只支持独占账号。
+
+手机 `auth` 可携带 `multiAgent:true, agentId:null|string`。`authed` 返回 `multiAgent:true, agents:[{id,name,pubkey}], agentId, peerOnline, peerPubkey`；只有一台在线且未指定目标时自动绑定，多台时保持未选状态。设备上线/下线通过 `agents` 推送当前在线列表和当前连接所选 `agentId`。已选离线目标不会自动切换。客户端切换电脑需重新建立带目标 ID 的连接，隔离本地会话、草稿和终端状态；网页按账号与 Agent ID 保存会话恢复键。
+
+Broker 只将手机密文转发到该连接已绑定的 Agent，忽略密文信封中自报的目标；Agent 发回的 `e2e` 信封附带 Broker 确定的 `agentId`，且其 `phoneId` 必须属于同一账号、同一 Agent。配对与加密协议不变，设备列表元信息可由 Broker 读取，业务消息仍端到端加密。账号停用、撤销和删除断开该账号所有 Agent 和手机。未支持电脑选择的旧手机在多台在线且无目标时返回 `agent_selection_required`。
+
 每个会话独立管理权限、队列、审批、历史和命令顺序，共享一个 Codex RPC 连接。历史与附件读取不进入任务控制队列。`closeThread {threadId}` 只关闭浏览标签，活动任务或等待队列仍保留；`watchThread {threadId,requestId}` 只读获取最新有界历史页，响应 `historyUpdate` 包含分页数据、`syncedAt`，已取得写入权时返回 `skipped:true`。前端轮询退避，不获取写入权；阅读旧页时不自动跳至最新位置。
 
 `state.projectless:true` 表示临时会话。`newThread.scope:"temporary"` 忽略传入的项目目录，创建应用数据目录下的独立工作目录并持久化归属；不会把空目录参数解释为沿用旧项目。`hello.historyEpoch` 用于识别缓存实例，实例改变时丢弃旧历史游标。
