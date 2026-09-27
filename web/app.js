@@ -20,6 +20,7 @@ let backoff = 1000;
 let reconnectTimer = null;
 let connectionTimer = null;
 let loginAbort = null;
+let cloudAuth = null;
 let connectionAttempt = 0;
 let connectionWanted = false;
 let sessionReady = false;
@@ -233,6 +234,7 @@ function showPairing() {
 }
 
 function loginFailed(msg, resend) {
+  cloudAuth = null;
   stopConnection();
   showSetup();
   switchTab("cloud");
@@ -409,24 +411,34 @@ function connectLan(attempt) {
 }
 
 async function connectCloud(attempt) {
-  let token;
-  const controller = new AbortController();
-  loginAbort = controller;
-  try {
-    const r = await fetch("/api/login", { method: "POST", signal: controller.signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ email: profile.email, password: profile.password }) });
-    if (attempt !== connectionAttempt) return;
-    if (r.status === 401) { loginFailed("账号或密码错误"); return; }
-    if (r.status === 403) {
-      const reason = await r.json().catch(() => ({}));
+  let token = cloudAuth?.email === profile.email && cloudAuth?.password === profile.password ? cloudAuth.token : null;
+  if (!token) {
+    const controller = new AbortController();
+    loginAbort = controller;
+    try {
+      const r = await fetch("/api/login", { method: "POST", signal: controller.signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ email: profile.email, password: profile.password }) });
       if (attempt !== connectionAttempt) return;
-      loginFailed(reason.error || "账号暂不可用", reason.code === "unverified"); return;
-    }
-    if (!r.ok) { scheduleReconnect(); return; }
-    const data = await r.json();
-    if (attempt !== connectionAttempt) return;
-    loginAbort = null;
-    token = data.token;
-  } catch { if (attempt === connectionAttempt) scheduleReconnect(); return; }
+      if (r.status === 429) {
+        const value = r.headers.get("Retry-After");
+        const seconds = value && /^\d+$/.test(value) ? Number(value) : value ? Math.ceil((Date.parse(value) - Date.now()) / 1000) : NaN;
+        const minutes = Math.ceil((Number.isFinite(seconds) && seconds > 0 ? seconds : 900) / 60);
+        loginFailed("登录尝试过于频繁，请在约 " + minutes + " 分钟后重试。已停止自动重连。"); return;
+      }
+      if (r.status === 400) { loginFailed("请检查邮箱格式和密码长度"); return; }
+      if (r.status === 401) { loginFailed("账号或密码错误"); return; }
+      if (r.status === 403) {
+        const reason = await r.json().catch(() => ({}));
+        if (attempt !== connectionAttempt) return;
+        loginFailed(reason.error || "账号暂不可用", reason.code === "unverified"); return;
+      }
+      if (!r.ok) { scheduleReconnect(); return; }
+      const data = await r.json();
+      if (attempt !== connectionAttempt) return;
+      loginAbort = null;
+      token = data.token;
+      cloudAuth = { email: profile.email, password: profile.password, token };
+    } catch { if (attempt === connectionAttempt) scheduleReconnect(); return; }
+  }
 
   let socket;
   try { socket = ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/link"); }
@@ -472,7 +484,7 @@ async function connectCloud(attempt) {
     }
     if (m.type === "error") {
       if (m.code === "account_disabled") { loginFailed("账号已被管理员停用，请联系管理员"); return; }
-      if (/token|invalid/i.test(m.message || "")) loginFailed("登录失效，请重新登录");
+      if (m.code === "session_revoked" || /token|invalid/i.test(m.message || "")) loginFailed("登录失效，请重新登录");
       return;
     }
   };

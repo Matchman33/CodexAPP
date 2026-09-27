@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { LinkRouter } from "./linkRouter.mjs";
+import { createAuthRateLimit } from "./authRateLimit.mjs";
 import { verifyDeviceProof } from "./deviceIdentity.mjs";
 import * as db from "./db.mjs";
 import { sendVerifyEmail, sendResetEmail, emailConfigured, testSmtp, getSmtpConfig } from "./mailer.mjs";
@@ -119,14 +120,13 @@ function issueReset(email) {
 }
 
 // ---- login/register rate limiting (per IP+email sliding window) ----
-const attempts = new Map();
-const RL_WINDOW = 15 * 60 * 1000, RL_MAX = 8;
-function rateLimited(key) {
-  const now = Date.now();
-  const arr = (attempts.get(key) || []).filter((t) => now - t < RL_WINDOW);
-  arr.push(now);
-  attempts.set(key, arr);
-  return arr.length > RL_MAX;
+const authRateLimit = createAuthRateLimit();
+function rateLimited(key, res) {
+  const retryAfter = authRateLimit(key);
+  if (!retryAfter) return false;
+  res.writeHead(429, { "Retry-After": String(retryAfter) });
+  res.end(JSON.stringify({ error: "尝试过于频繁，请稍后再试", retryAfter }));
+  return true;
 }
 
 const router = new LinkRouter();
@@ -266,7 +266,7 @@ function requestHandler(req, res) {
       let p; try { p = JSON.parse(body || "{}"); } catch { p = {}; }
       res.setHeader("content-type", "application/json");
       if (!validEmail(p.email)) { res.writeHead(400); return res.end(JSON.stringify({ error: "无效邮箱" })); }
-      if (rateLimited(ip + "|" + p.email)) { res.writeHead(429); return res.end(JSON.stringify({ error: "尝试过于频繁，请稍后再试" })); }
+      if (rateLimited(ip + "|" + p.email, res)) return;
 
       if (req.url === "/api/resend-verification") {
         const token = issueVerify(p.email);
@@ -306,7 +306,7 @@ function requestHandler(req, res) {
     req.on("end", () => {
       let p; try { p = JSON.parse(body || "{}"); } catch { p = {}; }
       res.setHeader("content-type", "application/json");
-      if (rateLimited("reset|" + ip)) { res.writeHead(429); return res.end(JSON.stringify({ error: "尝试过于频繁，请稍后再试" })); }
+      if (rateLimited("reset|" + ip, res)) return;
       const acc = p.token && db.getByResetToken(p.token);
       if (!acc || !acc.reset_expires || acc.reset_expires < Date.now()) { res.writeHead(400); return res.end(JSON.stringify({ error: "重置链接无效或已过期" })); }
       if (!validPassword(p.password)) { res.writeHead(400); return res.end(JSON.stringify({ error: "密码至少 8 位" })); }

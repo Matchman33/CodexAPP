@@ -40,7 +40,7 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
   };
   try {
     await fs.mkdir(path.join(root, "cloud"));
-    for (const name of ["broker.mjs", "linkRouter.mjs", "db.mjs", "mailer.mjs", "agent.mjs", "agentPhones.mjs", "e2e.mjs", "deviceIdentity.mjs"]) {
+    for (const name of ["broker.mjs", "authRateLimit.mjs", "linkRouter.mjs", "db.mjs", "mailer.mjs", "agent.mjs", "agentPhones.mjs", "e2e.mjs", "deviceIdentity.mjs"]) {
       await fs.copyFile(path.join("cloud", name), path.join(root, "cloud", name));
     }
     await fs.cp("core", path.join(root, "core"), { recursive: true });
@@ -246,6 +246,13 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
       const response = await fetch(base + route, { method: "POST", headers: { "x-admin-token": admin, "content-type": "application/json" }, body: "{}" });
       assert.equal(response.status, 404, "旧收费接口已取消：" + route);
     }
+    const limitedLogin = () => fetch(base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "rate-fixture@example.com", password: "wrong-password" }) });
+    for (let i = 0; i < 8; i++) assert.equal((await limitedLogin()).status, 401);
+    const limited = await limitedLogin();
+    assert.equal(limited.status, 429);
+    const retryAfter = Number(limited.headers.get("retry-after"));
+    assert(retryAfter > 0 && retryAfter <= 900);
+    assert.equal((await limited.json()).retryAfter, retryAfter);
   } finally {
     for (const ws of sockets) ws.terminate();
     for (const child of processes.reverse()) {
