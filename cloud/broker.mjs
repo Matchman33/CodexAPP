@@ -17,7 +17,6 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { LinkRouter } from "./linkRouter.mjs";
-import { createAuthRateLimit } from "./authRateLimit.mjs";
 import { verifyDeviceProof } from "./deviceIdentity.mjs";
 import * as db from "./db.mjs";
 import { sendVerifyEmail, sendResetEmail, emailConfigured, testSmtp, getSmtpConfig } from "./mailer.mjs";
@@ -117,16 +116,6 @@ function issueReset(email) {
   const token = newVerifyToken();
   db.setResetToken(acc.id, token, Date.now() + RESET_TTL_MS);
   return token;
-}
-
-// ---- login/register rate limiting (per IP+email sliding window) ----
-const authRateLimit = createAuthRateLimit();
-function rateLimited(key, res) {
-  const retryAfter = authRateLimit(key);
-  if (!retryAfter) return false;
-  res.writeHead(429, { "Retry-After": String(retryAfter) });
-  res.end(JSON.stringify({ error: "尝试过于频繁，请稍后再试", retryAfter }));
-  return true;
 }
 
 const router = new LinkRouter();
@@ -259,14 +248,12 @@ async function handleAdmin(req, res) {
 function requestHandler(req, res) {
   if (req.url.startsWith("/api/admin")) return handleAdmin(req, res);
   if (req.method === "POST" && (req.url === "/api/login" || req.url === "/api/register" || req.url === "/api/resend-verification" || req.url === "/api/forgot-password")) {
-    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").toString().split(",")[0].trim();
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 4096) req.destroy(); });
     req.on("end", async () => {
       let p; try { p = JSON.parse(body || "{}"); } catch { p = {}; }
       res.setHeader("content-type", "application/json");
       if (!validEmail(p.email)) { res.writeHead(400); return res.end(JSON.stringify({ error: "无效邮箱" })); }
-      if (rateLimited(ip + "|" + p.email, res)) return;
 
       if (req.url === "/api/resend-verification") {
         const token = issueVerify(p.email);
@@ -300,13 +287,11 @@ function requestHandler(req, res) {
 
   // Set a new password using a valid reset token (from the email link).
   if (req.method === "POST" && req.url === "/api/reset-password") {
-    const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "?").toString().split(",")[0].trim();
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 4096) req.destroy(); });
     req.on("end", () => {
       let p; try { p = JSON.parse(body || "{}"); } catch { p = {}; }
       res.setHeader("content-type", "application/json");
-      if (rateLimited("reset|" + ip, res)) return;
       const acc = p.token && db.getByResetToken(p.token);
       if (!acc || !acc.reset_expires || acc.reset_expires < Date.now()) { res.writeHead(400); return res.end(JSON.stringify({ error: "重置链接无效或已过期" })); }
       if (!validPassword(p.password)) { res.writeHead(400); return res.end(JSON.stringify({ error: "密码至少 8 位" })); }

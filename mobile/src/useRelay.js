@@ -172,7 +172,6 @@ export function useRelay(profile, keypair) {
             body: JSON.stringify({ email: profile.email, password: profile.password }),
           });
           if (generation !== generationRef.current || !aliveRef.current) return;
-          if (res.status === 429) { authBlockedRef.current = true; setConn("rateLimited"); return; }
           if (res.status === 401) { authBlockedRef.current = true; setConn("unauthorized"); return; }
           if (res.status === 403) {
             const reason = await res.json().catch(() => ({}));

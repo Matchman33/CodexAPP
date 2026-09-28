@@ -432,12 +432,6 @@ async function connectCloud(attempt) {
     try {
       const r = await fetch("/api/login", { method: "POST", signal: controller.signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ email: profile.email, password: profile.password }) });
       if (attempt !== connectionAttempt) return;
-      if (r.status === 429) {
-        const value = r.headers.get("Retry-After");
-        const seconds = value && /^\d+$/.test(value) ? Number(value) : value ? Math.ceil((Date.parse(value) - Date.now()) / 1000) : NaN;
-        const minutes = Math.ceil((Number.isFinite(seconds) && seconds > 0 ? seconds : 900) / 60);
-        loginFailed("登录尝试过于频繁，请在约 " + minutes + " 分钟后重试。已停止自动重连。"); return;
-      }
       if (r.status === 400) { loginFailed("请检查邮箱格式和密码长度"); return; }
       if (r.status === 401) { loginFailed("账号或密码错误"); return; }
       if (r.status === 403) {

@@ -254,19 +254,15 @@ async function startAgent() {
     if (generation !== startGeneration || !running) return;
     const msg = String(e.message || e);
     console.error("[agent] start failed:", msg);
-    // Auth problems won't fix themselves: drop back to the login form with a reason
-    // (and don't retry — this is what caused the 401→retry→429 rate-limit loop).
+    // 认证失败需要用户处理，其他连接错误继续自动重试。
     if (/login failed: 401/.test(msg)) { authToken = null; running = false; setStatus({ phase: "needLogin", error: "邮箱或密码错误，请重新登录" }); return; }
     if (msg.includes("account_disabled")) {
       authToken = null; running = false; config.sessionToken = null; config.loginRequired = true; saveConfig();
       setStatus({ phase: "needLogin", error: "账号已被管理员停用，请联系管理员" }); return;
     }
     if (/login failed: 403/.test(msg)) { authToken = null; running = false; setStatus({ phase: "needLogin", error: "邮箱未验证：请先点验证邮件里的链接，再登录" }); return; }
-    // On 429 back off long enough for the broker's 15-min rate window to clear
-    // (retrying too often just keeps it limited).
-    const rate = /login failed: 429/.test(msg);
-    setStatus({ phase: "error", error: rate ? "登录过于频繁，5 分钟后自动重试…" : ("连接失败：" + msg) });
-    if (running) retryAgent(rate ? 300000 : 3000);
+    setStatus({ phase: "error", error: "连接失败：" + msg });
+    if (running) retryAgent(3000);
   } finally {
     if (startingGeneration === generation) startingGeneration = null;
   }

@@ -1,4 +1,4 @@
-// Verify broker account hardening: validation, signed tokens, WS auth, rate limit.
+// Verify broker account validation, signed tokens and WebSocket authentication.
 // Usage: node cloud/test-auth.mjs   (broker must run on $B, default :8790)
 import fs from "node:fs";
 import { WebSocket } from "ws";
@@ -30,10 +30,6 @@ console.log(token && token.split(".").length === 2 ? "OK ✓  token shape payloa
 r("WS auth (valid token)", await wsAuth(token), "authed");
 r("WS auth (tampered token)", await wsAuth(token.slice(0, -3) + "xxx"), "err:invalid token");
 r("WS auth (garbage)", await wsAuth("garbage"), "err:invalid token");
-
-let last;
-for (let i = 0; i < 10; i++) last = (await post("/api/login", { email, password: "wrongpass1" })).status;
-r("rate limit after burst", last, 429);
 
 fs.writeFileSync(new URL("./.last-token.txt", import.meta.url), token);
 console.log("saved token -> cloud/.last-token.txt (for restart test)");

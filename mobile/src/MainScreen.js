@@ -77,7 +77,6 @@ export default function MainScreen({ relay, onForget }) {
   const running = relayState.status === "running";
 
   const connLabel =
-    conn === "rateLimited" ? "登录过于频繁，请稍后重新登录" :
     conn === "disabled" ? "账号已停用" :
     conn === "unauthorized" ? "账号/密码无效" :
     conn === "needCode" ? "需要配对码" :

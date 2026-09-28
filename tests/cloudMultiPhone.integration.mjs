@@ -40,7 +40,7 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
   };
   try {
     await fs.mkdir(path.join(root, "cloud"));
-    for (const name of ["broker.mjs", "authRateLimit.mjs", "linkRouter.mjs", "db.mjs", "mailer.mjs", "agent.mjs", "agentPhones.mjs", "e2e.mjs", "deviceIdentity.mjs"]) {
+    for (const name of ["broker.mjs", "linkRouter.mjs", "db.mjs", "mailer.mjs", "agent.mjs", "agentPhones.mjs", "e2e.mjs", "deviceIdentity.mjs"]) {
       await fs.copyFile(path.join("cloud", name), path.join(root, "cloud", name));
     }
     await fs.cp("core", path.join(root, "core"), { recursive: true });
@@ -267,13 +267,16 @@ test("真实 Broker 与两个隔离 Agent：多账号、多手机、配对、断
     await until(async () => (await computerC.status()).phase === "needLogin" && (await computerD.status()).phase === "needLogin");
     assert.equal((await computerC.status()).codexConnected, true);
     assert.equal((await computerD.status()).codexConnected, true);
-    const limitedLogin = () => fetch(base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "rate-fixture@example.com", password: "wrong-password" }) });
-    for (let i = 0; i < 8; i++) assert.equal((await limitedLogin()).status, 401);
-    const limited = await limitedLogin();
-    assert.equal(limited.status, 429);
-    const retryAfter = Number(limited.headers.get("retry-after"));
-    assert(retryAfter > 0 && retryAfter <= 900);
-    assert.equal((await limited.json()).retryAfter, retryAfter);
+    // 连续请求始终按凭据、账号状态和请求内容处理。
+    const requestAuth = (route, body) => fetch(base + route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    for (let i = 0; i < 12; i++) {
+      assert.equal((await requestAuth("/api/login", { email: multi.email, password: "wrong-password" })).status, 401);
+      assert.equal((await requestAuth("/api/login", { email: multi.email, password: multi.password })).status, 200);
+      assert.equal((await requestAuth("/api/register", { email: multi.email, password: multi.password })).status, 409);
+      assert.equal((await requestAuth("/api/resend-verification", { email: multi.email })).status, 200);
+      assert.equal((await requestAuth("/api/forgot-password", { email: "unknown@example.com" })).status, 200);
+      assert.equal((await requestAuth("/api/reset-password", { token: "invalid", password: "fixture-password" })).status, 400);
+    }
   } finally {
     for (const ws of sockets) ws.terminate();
     for (const child of processes.reverse()) {
