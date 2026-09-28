@@ -182,7 +182,7 @@ window.WebTerminal = class WebTerminal {
   show() {
     this.el("terminalPanel").classList.remove("hidden"); this.mount(); this.fit(); this.term.focus();
     this.command("terminalList");
-    const id = this.id || sessionStorage.getItem(this.key());
+    const id = this.id || readSessionValue(this.key());
     if (id) this.attach(id); else this.open();
   }
   command(type, fields = {}, track = true) {
@@ -248,7 +248,7 @@ window.WebTerminal = class WebTerminal {
       this.processStatus = m.status; this.canInput = !!m.canInput && m.status === "running"; this.ready = false;
       this.term.reset(); this.term.resize(m.cols, m.rows);
       this.el("terminalCwd").textContent = "启动目录：" + m.cwd;
-      sessionStorage.setItem(this.key(), this.id); this.el("terminalSelect").value = this.id;
+      writeSessionValue(this.key(), this.id); this.el("terminalSelect").value = this.id;
       const id = this.id;
       this.term.write(m.data, () => {
         if (this.id !== id || m.requestId !== this.attachRequest) return;
@@ -266,12 +266,25 @@ window.WebTerminal = class WebTerminal {
     else if (m.type === "terminalControl") { this.canInput = !!m.canInput; this.status(this.canInput ? "已连接" : "只读 · 可接管输入"); this.buttons(); }
     else if (m.type === "terminalResized") { this.canInput = false; this.term.resize(m.cols, m.rows); this.fit(); this.buttons(); }
     else if (m.type === "terminalExit") { this.processStatus = "exited"; this.canInput = false; this.status("已退出 · " + m.exitCode); this.buttons(); }
-    else if (m.type === "terminalClosed") { this.id = null; this.ready = false; this.canInput = false; sessionStorage.removeItem(this.key()); this.status("终端已结束"); this.buttons(); }
+    else if (m.type === "terminalClosed") { this.id = null; this.ready = false; this.canInput = false; removeSessionValue(this.key()); this.status("终端已结束"); this.buttons(); }
     return true;
   }
   disconnect() {
     this.connected = false; this.ready = false; this.canInput = false; this.opening = false;
     for (const timer of this.pending.values()) clearTimeout(timer); this.pending.clear();
     this.el("terminalBtn").disabled = true; this.status("连接已断开；终端仍由服务端保持"); this.buttons();
+  }
+  reset() {
+    this.disconnect();
+    clearTimeout(this.fitTimer); cancelAnimationFrame(this.zoomFrame);
+    this.id = this.lease = this.attachRequest = this.processStatus = null;
+    this.seq = this.inputSeq = this.scrollRemainder = 0;
+    this.pointers.clear();
+    this.term?.dispose(); this.term = this.fitAddon = null;
+    this.el("terminalSurface").replaceChildren();
+    this.el("terminalSurface").style.width = this.el("terminalSurface").style.height = "";
+    this.el("terminalPanel").classList.add("hidden");
+    this.el("terminalCwd").textContent = ""; this.el("terminalPasteText").value = "";
+    this.list([]); this.buttons(); this.updateNavigation();
   }
 };

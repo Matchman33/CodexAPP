@@ -5,6 +5,9 @@
 
 const $ = (id) => document.getElementById(id);
 const LS = { profile: "codexapp.profile", keys: "codexapp.keys" };
+function readSessionValue(key) { try { return sessionStorage.getItem(key); } catch { return null; } }
+function writeSessionValue(key, value) { try { sessionStorage.setItem(key, value); } catch {} }
+function removeSessionValue(key) { try { sessionStorage.removeItem(key); } catch {} }
 const fileDownloads = new window.FileDownloads(message => sendWs(message));
 const webTerminal = new window.WebTerminal(message => sendWs(message), () => ({ clientId: sessionClientId, threadId: appState.threadId, profile: viewKey() }));
 $("imageDialog").addEventListener("close", () => fileDownloads.clearPreview());
@@ -107,7 +110,7 @@ function renderSessionTabs() {
         const next = sessionSummaries.find(other => other.threadId !== s.threadId && !closedTabs.has(other.threadId));
         if (next) selectHistoryThread(next.threadId);
         else {
-          sessionStorage.removeItem(viewKey());
+          removeSessionValue(viewKey());
           appState = { ...appState, threadId: null, turnId: null, threadName: null, cwd: "", status: "idle", readOnly: false, projectless: false };
           historyFeed.replace([], true); pageCache.clear(); recentOverlay.clear(); historyPages = []; pagedHistory = false;
           pendingPrompt = pendingDirect = null; $("input").value = ""; attachments.items = []; attachments.render();
@@ -154,8 +157,8 @@ let writerTimer = null;
 let lastDiff = "";          // latest unified diff for the current turn
 let profile = loadProfile();
 try {
-  cloudAgentId = sessionStorage.getItem("codexapp.agent." + profile.email) || null;
-  const saved = JSON.parse(sessionStorage.getItem("codexapp.cloudAuth") || "null");
+  cloudAgentId = readSessionValue("codexapp.agent." + profile.email) || null;
+  const saved = JSON.parse(readSessionValue("codexapp.cloudAuth") || "null");
   if (saved?.email === profile.email && saved.profile === localStorage.getItem(LS.profile)) cloudAuth = { email: profile.email, password: profile.password, token: saved.token };
 } catch {}
 let keys = loadKeys();      // E2E keypair (cloud mode)
@@ -170,8 +173,8 @@ function loadProfile() {
 }
 function saveProfile(p) {
   if (p.email !== profile.email || p.password !== profile.password || p.mode !== profile.mode) {
-    cloudAuth = null; sessionStorage.removeItem("codexapp.cloudAuth");
-    cloudAgents = []; cloudAgentId = p.mode === "cloud" ? sessionStorage.getItem("codexapp.agent." + p.email) : null;
+    cloudAuth = null; removeSessionValue("codexapp.cloudAuth");
+    cloudAgents = []; cloudAgentId = p.mode === "cloud" ? readSessionValue("codexapp.agent." + p.email) : null;
     $("cloudDeviceBar").classList.add("hidden");
   }
   profile = p; localStorage.setItem(LS.profile, JSON.stringify(p));
@@ -248,7 +251,7 @@ function showPairing() {
 
 function loginFailed(msg, resend) {
   cloudAuth = null;
-  sessionStorage.removeItem("codexapp.cloudAuth");
+  removeSessionValue("codexapp.cloudAuth");
   stopConnection();
   showSetup();
   switchTab("cloud");
@@ -466,7 +469,7 @@ async function connectCloud(attempt) {
     if (m.type === "agents") { updateCloudAgents(m); return; }
     if (m.type === "peer") {
       if (cloudMultiAgent && m.agentId && cloudAgentId && m.agentId !== cloudAgentId) return;
-      if (cloudMultiAgent && m.agentId) { cloudAgentId = m.agentId; sessionStorage.setItem("codexapp.agent." + profile.email, cloudAgentId); }
+      if (cloudMultiAgent && m.agentId) { cloudAgentId = m.agentId; writeSessionValue("codexapp.agent." + profile.email, cloudAgentId); }
       agentPub = m.online ? m.pubkey : null;
       if (!m.online) {
         clearTimeout(connectionTimer); connectionTimer = null;
@@ -510,7 +513,7 @@ async function connectCloud(attempt) {
 function updateCloudAgents(message) {
   cloudAgents = message.agents || [];
   cloudAgentId = message.agentId || null;
-  if (cloudAgentId) sessionStorage.setItem("codexapp.agent." + profile.email, cloudAgentId);
+  if (cloudAgentId) writeSessionValue("codexapp.agent." + profile.email, cloudAgentId);
   const selected = cloudAgents.find(agent => agent.id === cloudAgentId);
   for (const id of ["cloudAgentSelect", "pairAgentSelect"]) {
     const select = $(id); select.replaceChildren();
@@ -526,12 +529,43 @@ function updateCloudAgents(message) {
 
 function switchCloudAgent(id) {
   if (!id || id === cloudAgentId || !cloudAgents.some(agent => agent.id === id)) return;
+  if (attachments.busy) { updateCloudAgents({ agents: cloudAgents, agentId: cloudAgentId }); return; }
   const draft = $("input").value.trim() || attachments.items.length || pendingPrompt || pendingDirect || [...sessionViews.values()].some(view => view.text?.trim() || view.images?.length || view.pendingPrompt || view.pendingDirect);
   if (draft && !confirm("切换电脑将清除当前页面未发送或尚未确认发送的草稿，是否继续？")) { updateCloudAgents({ agents: cloudAgents, agentId: cloudAgentId }); return; }
-  sessionStorage.setItem("codexapp.agent." + profile.email, id);
-  if (cloudAuth) sessionStorage.setItem("codexapp.cloudAuth", JSON.stringify({ email: profile.email, token: cloudAuth.token, profile: localStorage.getItem(LS.profile) }));
   stopConnection();
-  location.reload();
+  resetCloudTarget();
+  cloudAgentId = id;
+  writeSessionValue("codexapp.agent." + profile.email, id);
+  updateCloudAgents({ agents: cloudAgents, agentId: id });
+  showApp();
+  connect();
+}
+
+function resetCloudTarget() {
+  // 只清理当前页面，电脑上的任务、队列和终端继续运行。
+  for (const timer of [modelsTimer, configTimer, writerTimer, threadActionTimer]) clearTimeout(timer);
+  modelsTimer = configTimer = writerTimer = threadActionTimer = null;
+  pendingConfig = writerConflict = writerChoice = writerPending = threadActionChoice = threadActionPending = null;
+  pendingPrompt = pendingDirect = lastSelectionId = watchRequest = liveAssistant = null;
+  appState = {}; multiSession = false; serviceRestart = { phase: "idle" }; threadManagement = {};
+  historyEpoch = null; sessionSummaries = []; historyPages = []; pagedHistory = false;
+  oldestPage = newestPage = watchAfter = 0; watchDelay = 2000; followLatest = true;
+  promptQueueState = null; queueExpanded = true; imageUploadSupported = false;
+  for (const collection of [sessionViews, closedTabs, unreadSessions, sessionRevisions, deletedThreads, pageCache, recentOverlay]) collection.clear();
+  modelCatalog = []; defaultModel = defaultReasoningEffort = lastProjectTree = null;
+  $("input").value = ""; $("input").style.height = "";
+  attachments.items = []; attachments.render();
+  $("approvals").replaceChildren(); $("sessionsList").replaceChildren(); $("sessionSearch").value = "";
+  $("sessionTabs").removeAttribute("data-active");
+  for (const id of ["promptStatus", "watchStatus", "threadActionStatus", "threadActionError", "cfgError", "pMsg", "pStatus"]) $(id).textContent = "";
+  $("pCode").value = ""; $("steerMode").checked = false;
+  $("threadActionCancel").disabled = false; $("modelsRefresh").disabled = false;
+  for (const id of ["sheet", "diffSheet", "writerSheet", "newSessionSheet", "restartSheet", "sessionsSheet"]) $(id).classList.add("hidden");
+  for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
+  fileDownloads.reset(); webTerminal.reset();
+  historyFeed.replace([], true); setDiff("");
+  renderSessionTabs(); renderPromptQueue(); renderServiceRestart(); updateHistoryControls(); updateSettingsButtons();
+  applyState();
 }
 $("cloudAgentSelect").onchange = event => switchCloudAgent(event.target.value);
 $("pairAgentSelect").onchange = event => switchCloudAgent(event.target.value);
@@ -602,7 +636,7 @@ function handle(m) {
         serviceRestart = m.serviceRestart || serviceRestart;
         if (m.sessions) sessionSummaries = m.sessions;
         if (!m.state?.threadId && !m.requestId && !pendingSelection) {
-          const saved = appState.threadId || sessionStorage.getItem(viewKey());
+          const saved = appState.threadId || readSessionValue(viewKey());
           if (saved && !deletedThreads.has(saved)) { sessionReady = true; selectHistoryThread(saved); return; }
         }
       }
@@ -625,7 +659,7 @@ function handle(m) {
       appState = m.state || {};
       webTerminal.configure(m.terminal);
       historyEpoch = m.historyEpoch || null;
-      if (multiSession && appState.threadId) { sessionStorage.setItem(viewKey(), appState.threadId); closedTabs.delete(appState.threadId); }
+      if (multiSession && appState.threadId) { writeSessionValue(viewKey(), appState.threadId); closedTabs.delete(appState.threadId); }
       threadManagement = m.threadManagement || {};
       imageUploadSupported = !!m.imageUpload?.supported;
       fileDownloads.configure(m.fileDownloads);
@@ -1532,7 +1566,7 @@ setInterval(() => {
 }, 1000);
 $("quickNewThread").onclick = $("sidebarNewThread").onclick = quickNewThread;
 function forget() {
-  sessionStorage.removeItem("codexapp.cloudAuth");
+  removeSessionValue("codexapp.cloudAuth");
   localStorage.removeItem(LS.profile); // keep keys so the device stays paired
   location.reload();
 }
@@ -1687,7 +1721,7 @@ function forgetDeletedThread(threadId) {
     for (const request of itemRequests.values()) clearTimeout(request.timer);
     itemRequests.clear(); pageCache.clear(); recentOverlay.clear(); historyPages = [];
     historyFeed.replace([], true); liveAssistant = null; pagedHistory = false;
-    sessionStorage.removeItem(viewKey());
+    removeSessionValue(viewKey());
     appState = { ...appState, threadId: null, turnId: null, threadName: null, cwd: "", status: "idle", readOnly: false, writerReleased: false };
     promptQueueState = null; setDiff(""); $("approvals").replaceChildren();
     applyState(); renderPromptQueue(); updateHistoryControls();

@@ -145,6 +145,11 @@ window.FileDownloads = class FileDownloads {
     clearTimeout(task.timer); this.active = null; this.feedback(task.file, message);
   }
   disconnect() { if (this.active) this.cancel("连接已断开，请重新下载"); }
+  reset() {
+    this.disconnect(); this.clearCached(); this.clearPreview();
+    this.highlighter.cancel(); this.textPreview = null; this.supported = false; this.messages.clear();
+    $("textPreviewContent").textContent = "";
+  }
   download(cached) { const link = document.createElement("a"); link.href = cached.url; link.download = cached.file.name; document.body.append(link); link.click(); link.remove(); }
   clearCached() { if (this.cached) URL.revokeObjectURL(this.cached.url); this.cached = null; }
   showTextPreview(preview) {
