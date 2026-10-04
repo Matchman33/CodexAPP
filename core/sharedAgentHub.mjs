@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { WebSocket } from "ws";
 import { createLocalRelay, relayDefaults } from "../relay/transport.mjs";
 import { persistModel } from "./modelSettings.mjs";
+import { watchSocket } from "./socketLiveness.mjs";
 
 // Agent 只持有传输连接；直连服务是会话、队列、审批和终端的唯一所有者。
 export class SharedAgentHub {
@@ -52,13 +53,15 @@ export class SharedAgentHub {
       this.control = await this.openSocket("cloud-control-" + crypto.randomUUID(), true);
     }
     this.latest = this.control.snapshot; Object.assign(this.state, this.latest.state);
+    this.owner?.hub.ensureConnected();
   }
   openSocket(clientId, control = false) {
     return new Promise((resolve, reject) => {
       const host = this.config.host === "::" ? "[::1]" : this.config.host === "0.0.0.0" ? "127.0.0.1" : this.config.host;
       const url = new URL("ws://" + host + ":" + this.config.port + "/ws");
       url.searchParams.set("token", this.config.token); url.searchParams.set("clientId", clientId);
-      const ws = new WebSocket(url), entry = { ws, clientId, control, ready: false, snapshot: null };
+      const ws = new WebSocket(url, { handshakeTimeout: 10000 }), entry = { ws, clientId, control, ready: false, snapshot: null };
+      watchSocket(ws);
       const timer = setTimeout(() => { ws.terminate(); reject(new Error("本机中继连接超时")); }, 10000);
       ws.on("error", error => { if (!entry.ready) { clearTimeout(timer); reject(error); } });
       ws.on("message", raw => {

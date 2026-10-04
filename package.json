@@ -36,6 +36,7 @@
     "test:sleep-process": "node tests/sleepPrevention.windows.integration.mjs",
     "start": "node scripts/run.mjs relay",
     "start:agent": "node scripts/run.mjs agent",
+    "start:broker": "node scripts/run.mjs broker",
     "probe": "node relay/probe.mjs"
   },
   "dependencies": {
@@ -50,6 +51,7 @@
     "marked": "^18.0.12",
     "node-pty": "^1.1.0",
     "nodemailer": "^9.0.1",
+    "smol-toml": "^1.9.0",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
     "ws": "^8.18.0"

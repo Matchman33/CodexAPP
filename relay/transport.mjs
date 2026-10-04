@@ -6,6 +6,7 @@ import os from "node:os";
 import { WebSocket, WebSocketServer } from "ws";
 import { SessionHub } from "../core/sessionHub.mjs";
 import { enableServiceRestart, hostRestart } from "../core/serviceRestart.mjs";
+import { watchSocket } from "../core/socketLiveness.mjs";
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".webmanifest": "application/manifest+json", ".png": "image/png", ".svg": "image/svg+xml" };
 export const relayDefaults = { codexBin: "", host: "0.0.0.0", port: 4123, token: "", defaultCwd: os.homedir(), approvalPolicy: "on-request", sandbox: "workspace-write", model: null, reasoningEffort: null, preventSleep: true, originator: "codex_vscode" };
@@ -50,6 +51,7 @@ export function createLocalRelay({ config, dataDir, webDir, saveModel, sleepStat
   });
   const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 8 * 1048576 });
   wss.on("connection", (ws, req) => {
+    watchSocket(ws);
     const url = new URL(req.url, "http://localhost");
     if (url.searchParams.get("token") !== config.token) { send(ws, { type: "error", message: "无效 token" }); ws.close(4001, "unauthorized"); return; }
     const id = url.searchParams.get("clientId") || "legacy";

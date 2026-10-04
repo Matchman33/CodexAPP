@@ -1,7 +1,7 @@
 // CodexApp PC agent (cloud mode) — with a built-in local control panel.
 //
-// Runs on the user's PC next to Codex. Double-click → it opens a local web panel
-// (http://127.0.0.1:7878) where you LOGIN / REGISTER and watch status. After
+// Runs on the user's PC next to Codex. Prints the local web panel URL
+// (http://127.0.0.1:7878) for login, registration and connection status. After
 // login it connects OUTBOUND to the cloud broker, authenticates with the account,
 // and bridges the broker <-> local `codex app-server`. All phone/web traffic is
 // end-to-end encrypted; the broker only relays ciphertext.
@@ -10,6 +10,7 @@
 //
 // Run:  node cloud/agent.mjs        (or the packaged CodexApp-Agent.exe)
 import fs from "node:fs";
+import "../core/managedProcess.mjs";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
@@ -22,6 +23,7 @@ import { createSleepPrevention } from "../core/sleepPrevention.mjs";
 import { loadOrCreateKeyPair, fingerprint } from "./e2e.mjs";
 import { AgentPhones } from "./agentPhones.mjs";
 import { loadDeviceIdentity, signDeviceChallenge } from "./deviceIdentity.mjs";
+import { watchSocket } from "../core/socketLiveness.mjs";
 
 function appDir() {
   // Per-user, writable, stable config dir — independent of where the binary/script
@@ -98,6 +100,7 @@ fs.writeFileSync(PAIRING_TXT, pairing.code + "\n");
 
 // ---- live status (read by the control panel) ----
 const status = {
+  processId: process.pid,
   phase: "needLogin", // needLogin|startingCodex|loggingIn|connecting|waitingPeer|pairing|paired|error
   brokerConnected: false,
   codexConnected: false,
@@ -113,6 +116,7 @@ const status = {
   deviceName,
   brokerUrl: CLOUD_BROKER,
   error: "",
+  lastConnectedAt: null, lastDisconnectAt: null, reconnectCount: 0,
 };
 function setStatus(p) { Object.assign(status, p); }
 
@@ -157,21 +161,31 @@ async function login() {
   const res = await fetch(CLOUD_BROKER + "/api/login", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ email: config.email, password: config.password }),
+    signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok) throw new Error("login failed: " + res.status + " " + (await res.text()));
+  if (!res.ok) {
+    const error = new Error("login failed: " + res.status + " " + (await res.text()));
+    error.retryAfter = Math.max(0, Number(res.headers.get("retry-after")) || 0) * 1000;
+    throw error;
+  }
   return (await res.json()).token;
 }
 
 function connect(token) {
   const previous = ws;
   ws = null;
-  previous?.close();
+  previous?.terminate();
   setStatus({ brokerConnected: false });
   phones.clear();
-  const socket = ws = new WebSocket(CLOUD_BROKER.replace(/^http/, "ws") + "/link");
+  const socket = ws = new WebSocket(CLOUD_BROKER.replace(/^http/, "ws") + "/link", { handshakeTimeout: 10000 });
+  let authTimer;
+  watchSocket(socket, { interval: config.heartbeatIntervalMs || 20000, timeout: config.heartbeatTimeoutMs || 15000, failed: reason => {
+    setStatus({ error: reason + "，正在自动重连" });
+    console.error("[agent]", reason, "，重新连接 Broker");
+  } });
   socket.on("open", () => {
     if (ws !== socket || !running) { socket.close(); return; }
-    backoff = 1000;
+    authTimer = setTimeout(() => { console.error("[agent] Broker 认证超时，重新连接"); socket.terminate(); }, 15000);
     socket.send(JSON.stringify({ type: "auth", token, role: "agent", pubkey: keys.publicKey, multiPhone: true, deviceKey: deviceIdentity.publicKey, deviceName }));
   });
   socket.on("message", (raw) => {
@@ -184,12 +198,14 @@ function connect(token) {
       return;
     }
     if (m.type === "authed") {
+      clearTimeout(authTimer);
       if (!m.multiPhone || m.deviceIdentity !== true) {
         running = false;
         setStatus({ phase: "error", error: "请先更新云端 Broker，启用多客户端和设备身份认证" });
         socket.close(); return;
       }
-      setStatus({ phase: m.peerOnline ? "connecting" : "waitingPeer", brokerConnected: true, agentId: m.agentId, error: "" });
+      backoff = 1000;
+      setStatus({ phase: m.peerOnline ? "connecting" : "waitingPeer", brokerConnected: true, agentId: m.agentId, error: "", lastConnectedAt: new Date().toISOString() });
       console.log("[agent] linked. peerOnline=" + m.peerOnline);
       for (const peer of m.peers || []) phones.online(peer.phoneId, peer.pubkey).catch(error => setStatus({ error: error.message }));
       return;
@@ -218,17 +234,20 @@ function connect(token) {
       } else { setStatus({ error: m.message || "broker error" }); console.error("[agent] broker error:", m.message); }
     }
   });
-  socket.on("close", () => {
+  socket.on("close", (code) => {
+    clearTimeout(authTimer);
     if (ws !== socket) return;
-    setStatus({ brokerConnected: false });
+    setStatus({ brokerConnected: false, lastDisconnectAt: new Date().toISOString() });
     phones.clear();
     setStatus({ brokerConnected: false, peerOnline: false, paired: false });
     if (!running) { if (status.phase !== "error") setStatus({ phase: "needLogin" }); return; }
     setStatus({ phase: "connecting" });
-    retryAgent(backoff);
+    status.reconnectCount++;
+    console.error(`[agent] Broker 断开 code=${code}；${Math.round(backoff)}ms 后重连（第 ${status.reconnectCount} 次）`);
+    retryAgent(backoff + Math.floor(Math.random() * 500));
     backoff = Math.min(backoff * 1.6, 15000);
   });
-  socket.on("error", () => { try { socket.close(); } catch {} });
+  socket.on("error", error => { console.error("[agent] Broker 连接错误:", error.code || error.message); socket.terminate(); });
 }
 
 async function startAgent() {
@@ -244,7 +263,7 @@ async function startAgent() {
       authToken = token; config.sessionToken = token; saveConfig();
     }
     setStatus({ phase: "startingCodex" });
-    if (!bridge.state.codexConnected) await bridge.start();
+    await bridge.start();
     if (generation !== startGeneration || !running) return;
     if (!queuesRestored) { bridge.restoreQueues(); queuesRestored = true; }
     status.codexConnected = !!bridge.state.codexConnected;
@@ -262,7 +281,7 @@ async function startAgent() {
     }
     if (/login failed: 403/.test(msg)) { authToken = null; running = false; setStatus({ phase: "needLogin", error: "邮箱未验证：请先点验证邮件里的链接，再登录" }); return; }
     setStatus({ phase: "error", error: "连接失败：" + msg });
-    if (running) retryAgent(3000);
+    if (running) { retryAgent(Math.max(backoff, e.retryAfter || 0)); backoff = Math.min(backoff * 1.6, 15000); }
   } finally {
     if (startingGeneration === generation) startingGeneration = null;
   }
@@ -369,14 +388,12 @@ function startPanel(port, tries = 0) {
   });
   server.listen(port, "127.0.0.1", () => {
     void sleepPrevention.start();
-    const url = "http://127.0.0.1:" + port;
+    const url = "http://127.0.0.1:" + server.address().port;
     try { fs.writeFileSync(path.join(BASE, "panel.url"), url); } catch {} // so a launcher (Electron) knows the URL
     console.log("[panel] 控制面板: " + url);
     console.log("[agent] device fingerprint:", status.fingerprint, " PAIRING CODE:", pairing.code);
-    // Open the panel as a standalone APP WINDOW (chromeless: no address bar/tabs),
-    // so it looks like a desktop client, not a web page. The installer's autostart
-    // launcher sets CODEXAPP_NO_OPEN=1 so the background agent stays silent.
-    if (!process.env.CODEXAPP_NO_OPEN) openAppWindow(url);
+    // 控制台启动默认不弹窗；需要时显式开启，兼容安装器的静默启动设置。
+    if (process.env.CODEXAPP_OPEN_PANEL === "1" && !process.env.CODEXAPP_NO_OPEN) openAppWindow(url);
   });
 }
 

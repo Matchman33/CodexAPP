@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import "../core/managedProcess.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import os from "node:os";

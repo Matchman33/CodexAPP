@@ -38,6 +38,7 @@ export class SessionHub {
   }
   get state() { return this.control.state; }
   async start() { if (!this.starting) this.starting = this.control.start().finally(() => { this.starting = null; }); return this.starting; }
+  ensureConnected() { this.control.ensureConnected(); }
   controlMessage(m) {
     if (m.type !== "state") return;
     for (const bridge of this.sessions.values()) {
@@ -73,7 +74,7 @@ export class SessionHub {
   create(paged = true) {
     const shared = this.control.codex;
     const client = {
-      request: (method, params) => shared.request(method, params),
+      request: (method, params, options) => shared.request(method, params, options),
       respond: (...args) => shared.respond(...args), respondError: (...args) => shared.respondError(...args),
       get child() { return shared.child; },
     };
@@ -128,6 +129,7 @@ export class SessionHub {
   async stop() {
     if (this.terminals.activeCount) throw new Error("仍有活动终端，请先明确结束终端再重启项目");
     const child = this.control.codex.child;
+    this.control.stopRecovery();
     this.control.codex.onExit = () => {};
     this.control.state.codexConnected = false; this.controlMessage({ type: "state", state: this.control.state });
     if (!child || child.exitCode !== null || child.signalCode !== null) return;

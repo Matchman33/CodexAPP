@@ -12,6 +12,7 @@
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
+import "../core/managedProcess.mjs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -443,4 +444,9 @@ wss.on("connection", (ws) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`CodexApp broker [${scheme}] on ${HOST}:${PORT}  email=${emailConfigured() ? "SMTP" : "console-log (dev)"}  admin=${ADMIN_TOKEN ? "on" : "off (set ADMIN_TOKEN)"}`);
+});
+process.on("message", message => {
+  if (message?.type !== "codexapp-stop" || process.env.CODEXAPP_MANAGED !== "1") return;
+  for (const socket of wss.clients) socket.terminate();
+  wss.close(() => server.close(() => process.exit(0)));
 });

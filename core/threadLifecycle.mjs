@@ -90,7 +90,7 @@ export async function restartIdleCodex(client, bootstrap) {
   const child = client.child;
   if (!child || child.exitCode !== null || child.signalCode !== null) throw new Error("控制进程已退出，请等待连接恢复后重试");
   client.releasingChild = child;
-  for (const pending of client.pending.values()) pending.reject(new Error("会话释放期间控制连接重连，请重试读取"));
+  for (const pending of client.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("会话释放期间控制连接重连，请重试读取")); }
   client.pending.clear();
   try {
     // EOF 让专用 app-server 正常退出；不杀外部进程，也不重启中继。

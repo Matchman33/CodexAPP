@@ -102,6 +102,8 @@ curl http://127.0.0.1:8787/health
 
 ## 配置客户端
 
+若暂时不用 systemd，可在项目目录和已设置环境变量的终端中运行 `npm run start:broker`。启动器在 Broker 异常退出后自动退避重启；Ctrl+C 会停止服务。宝塔 Node 项目也可设置启动文件为项目内的 `scripts/run.mjs`、参数为 `broker`、运行目录为项目根目录，保留原有环境变量。不要同时启动两份服务占用同一端口。该方式不提供系统重启后的自动启动；需要时再启用上述 systemd 服务。
+
 电脑在启动 Agent 的终端中设置同一个地址：
 
 ```powershell
