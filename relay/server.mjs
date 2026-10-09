@@ -31,7 +31,6 @@ process.on("message", async m => {
 });
 try {
   const port = await relay.start(); await sleepPrevention.start();
-  console.log("[codex] binary:", relay.hub.control.codex.bin);
   console.log("CodexApp relay: http://127.0.0.1:" + port);
   console.log("Token: " + config.token);
 } catch (error) {

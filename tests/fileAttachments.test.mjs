@@ -31,6 +31,45 @@ test("同一文件的相对和绝对链接都映射到同一附件", t => {
   assert.deepEqual(result.files[0].references, ["chart.png", absolute]);
 });
 
+test("项目图片纯路径、图片链接和生成事件均按实际路径登记", async t => {
+  const { root, store, write } = fixture(t);
+  const absolute = write("outputs/生成图片.png", "project-image");
+  for (const text of [absolute, "outputs/生成图片.png", "![生成图片](<" + absolute + ">)", "[查看图片](<" + absolute + ">)"]) {
+    const event = store.decorateEvent({ kind: "item:agentMessage", threadId: "one", text }, { threadId: "one", cwd: root });
+    assert.equal(event.files?.[0]?.name, "生成图片.png", text);
+    assert.equal(Buffer.from((await store.read({ attachmentId: event.files[0].id, threadId: "one" })).data, "base64").toString(), "project-image");
+  }
+});
+
+test("Codex 默认生成目录仅开放消息引用的图片，历史和生成事件可传输且不放开其他隐藏文件", async t => {
+  const { temp, root } = fixture(t), codexHome = path.join(temp, ".codex");
+  const generated = path.join(codexHome, "generated_images"); fs.mkdirSync(generated, { recursive: true });
+  const file = path.join(generated, "结果.png"); fs.writeFileSync(file, "generated-image");
+  fs.writeFileSync(path.join(generated, "auth.json"), "private");
+  fs.writeFileSync(path.join(codexHome, "private.png"), "private");
+  fs.mkdirSync(path.join(generated, ".private")); fs.writeFileSync(path.join(generated, ".private", "secret.png"), "private");
+  const store = new FileAttachments({ codexHome }); store.remember("one", root);
+  for (const event of [
+    { kind: "item:agentMessage", text: "![结果](<" + file.replaceAll("\\", "/") + ">)" },
+    { kind: "item:agentMessage", text: "[原生路径图片](<" + file + ">)" },
+    { kind: "item:agentMessage", text: "![原生路径图片](<" + file + ">)" },
+    { kind: "item:agentMessage", text: file },
+    itemToEvent({ id: "generated", type: "imageGeneration", savedPath: file, status: "completed" }),
+  ]) {
+    const response = store.decorate({ type: "historyPage", events: [{ ...event, threadId: "one" }] }, { threadId: "one", cwd: root });
+    const registered = response.events[0].files?.[0]; assert(registered, "默认生成目录图片应可读取");
+    assert.equal(registered.preview, true);
+    assert.equal(Buffer.from((await store.read({ attachmentId: registered.id, threadId: "one" })).data, "base64").toString(), "generated-image");
+    await assert.rejects(store.read({ attachmentId: registered.id, threadId: "other" }), /失效/);
+  }
+  for (const blocked of [path.join(generated, "auth.json"), path.join(codexHome, "private.png"), path.join(generated, ".private", "secret.png")]) assert.equal(store.register(blocked, "one"), null);
+  // 已登记的图片被替换为指向隐藏文件的链接后，不能继续下载。
+  const registered = store.register(file, "one"); fs.unlinkSync(file);
+  fs.symlinkSync(path.join(codexHome, "private.png"), file);
+  await assert.rejects(store.read({ attachmentId: registered.id, threadId: "one" }));
+  assert.equal(store.register(file, "one"), null);
+});
+
 test("项目外 Markdown 链接通过附件通道读取，仍拒绝隐藏文件", async t => {
   const { root, temp, store, write } = fixture(t);
   const absolute = write("docs/说明.md", "# 本地 Markdown\n正文");

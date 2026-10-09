@@ -15,6 +15,8 @@ test("Windows 云 Agent 和直连启动均不固定自动路径，重连时重�
   const local = path.join(root, "profile"), base = path.join(local, "OpenAI", "Codex", "bin");
   const envKeys = ["LOCALAPPDATA", "PATH", "NODE_OPTIONS", "CODEX_HOME"], previous = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   let bridge, relay;
+  const startupLogs = [], originalLog = console.log;
+  console.log = (...parts) => { startupLogs.push(parts.join(" ")); originalLog(...parts); };
   try {
     const preload = path.join(root, "fake.mjs");
     await fs.writeFile(preload, `
@@ -47,6 +49,8 @@ if (process.argv[1]?.endsWith('app-server')) {
     await restartIdleCodex(bridge.codex, () => bridge._bootstrap());
     assert.equal(bridge.codex.bin, second); assert.equal(config.codexBin, "");
     assert.equal(bridge.state.codexVersion, "2222222222222222");
+    assert(startupLogs.some(line => line.includes(first)), "共享启动流程应记录首次实际运行路径");
+    assert(startupLogs.some(line => line.includes(second)), "重连应记录更新后的实际运行路径");
     bridge.codex.onExit = () => {};
     const closed = once(bridge.codex.child, "close"); bridge.codex.child.stdin.end(); await closed;
 
@@ -72,6 +76,7 @@ if (process.argv[1]?.endsWith('app-server')) {
     assert(log.includes(second));
     assert.deepEqual(JSON.parse(await fs.readFile(configFile, "utf8")), relayConfig, "启动不能将自动路径写入配置");
   } finally {
+    console.log = originalLog;
     if (bridge) {
       bridge.codex.onExit = () => {};
       const child = bridge.codex.child;

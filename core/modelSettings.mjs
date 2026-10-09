@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { catalogConfig, catalogSource, readCatalog } from "./modelCatalog.mjs";
 
 export function normalizeModel(value) {
   if (value === null) return null;
@@ -46,13 +45,12 @@ export function persistModel(file, model, settings = {}) {
 }
 
 export class ModelSettings {
-  constructor(codex, config, save = () => {}, options = {}) {
+  constructor(codex, config, save = () => {}) {
     this.codex = codex;
     this.config = config;
     this.save = save;
     this.cachedCatalog = null;
     this.catalogTime = 0;
-    this.catalogOptions = options;
   }
 
   select(value) {
@@ -92,17 +90,7 @@ export class ModelSettings {
     } finally { clearTimeout(timer); }
   }
 
-  async catalog(cwd, effective) {
-    if (effective === undefined && cwd !== undefined) {
-      try { effective = (await this.request("config/read", { cwd, includeLayers: false }))?.config; } catch { effective = {}; }
-    }
-    const config = effective?.model_provider || effective?.model_catalog_json || this.catalogOptions.configFile
-      ? catalogConfig(effective, this.catalogOptions.configFile) : effective || {};
-    if (catalogSource(config)) {
-      this.cachedCatalog = await readCatalog(config, this.catalogOptions);
-      this.catalogTime = Date.now();
-      return this.cachedCatalog;
-    }
+  async catalog() {
     const models = new Map();
     const cursors = new Set();
     let cursor = null;
@@ -131,7 +119,7 @@ export class ModelSettings {
   async defaultModel(cwd) {
     const res = await this.request("config/read", { cwd, includeLayers: false });
     if (res?.config?.model) return res.config.model;
-    const models = await this.catalog(cwd, res?.config);
+    const models = await this.catalog();
     const model = models.find((m) => m.isDefault)?.model;
     if (!model) throw new Error("Cannot resolve default model; select an explicit model ID");
     return model;
@@ -144,7 +132,7 @@ export class ModelSettings {
 
   async resolveEffort(cwd, model, previousEffort = null) {
     if (!this.cachedCatalog || Date.now() - this.catalogTime > 60000) {
-      try { await this.catalog(cwd); } catch { /* 私有模型允许在目录不可用时继续使用。 */ }
+      try { await this.catalog(); } catch { /* 私有模型允许在目录不可用时继续使用。 */ }
     }
     if (this.config.reasoningEffort) {
       this.validateEffort(model, this.config.reasoningEffort);
@@ -168,7 +156,7 @@ export class ModelSettings {
     let effective;
     try { effective = (await this.request("config/read", { cwd, includeLayers: false }))?.config; } catch { effective = {}; }
     const [catalog, defaults, config] = await Promise.allSettled([
-      this.catalog(cwd, effective), effective?.model ? Promise.resolve(effective.model) : this.defaultModel(cwd), Promise.resolve({ config: effective }),
+      this.catalog(), effective?.model ? Promise.resolve(effective.model) : this.defaultModel(cwd), Promise.resolve({ config: effective }),
     ]);
     return {
       type: "models",

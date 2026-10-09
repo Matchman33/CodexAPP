@@ -4,6 +4,15 @@ window.FileDownloads = class FileDownloads {
   constructor(send) {
     this.send = send; this.active = null; this.supported = false; this.maxBytes = 32 * 1048576; this.chunkBytes = 192 * 1024;
     this.textLimit = 1048576; this.previewUrl = null; this.cached = null; this.textPreview = null; this.messages = new Map();
+    this.thumbnails = new Map(); this.thumbnailQueue = new Map();
+    this.thumbnailObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) {
+        this.thumbnailObserver.unobserve(entry.target);
+        const file = entry.target._file;
+        if (!this.thumbnails.has(file.id) && !this.messages.has(file.id)) this.thumbnailQueue.set(file.id, file);
+      }
+      this.pumpThumbnails();
+    });
     this.highlighter = new window.ChatUI.PreviewHighlighter();
     for (const language of window.ChatUI.previewLanguages) $("textPreviewLanguage").add(new Option(language.label, language.id));
     $("textPreviewLanguage").onchange = () => this.renderText();
@@ -19,10 +28,22 @@ window.FileDownloads = class FileDownloads {
     return /\.(txt|md|json|csv|html|css|js|mjs|ts|py|c|cpp|h|svg)$/i.test(file.name) ? "text" : null;
   }
   render(row, event) {
+    row.querySelectorAll(".file-image-preview").forEach(button => this.thumbnailObserver.unobserve(button));
     row.querySelector(".file-attachments")?.remove();
     row.querySelectorAll(".file-reference-copy").forEach(button => button.remove());
     const files = this.supported ? event.files || [] : [];
     const list = document.createElement("div"); list.className = "file-attachments"; list.setAttribute("aria-label", event.kind === "item:fileChange" ? "变更文件附件" : "生成的文件");
+    const gallery = document.createElement("div"); gallery.className = "file-images";
+    for (const file of files.slice(0, 12).filter(file => FileDownloads.previewKind(file) === "image")) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "photo-preview file-image-preview";
+      button._file = file; button.dataset.attachmentId = file.id; button.setAttribute("aria-label", "放大图片：" + file.name);
+      button.onclick = () => this.start(file, true);
+      const cached = this.thumbnails.get(file.id);
+      if (cached) this.showThumbnail(button, cached);
+      else { button.textContent = "加载图片…"; this.thumbnailObserver.observe(button); }
+      gallery.append(button);
+    }
+    if (gallery.children.length) list.append(gallery);
     for (const file of files.slice(0, 12)) {
       const card = document.createElement("div"); card.className = "file-attachment";
       card.dataset.attachmentId = file.id;
@@ -79,6 +100,30 @@ window.FileDownloads = class FileDownloads {
     const button = document.createElement("button"); button.type = "button"; button.className = "icon-btn"; button.title = title; button.setAttribute("aria-label", title);
     button.innerHTML = '<i data-lucide="' + icon + '"></i>'; button.onclick = action; return button;
   }
+  showThumbnail(button, cached) {
+    const image = document.createElement("img"); image.src = cached.url; image.alt = cached.file.name; image.decoding = "async";
+    image.onerror = () => { button.textContent = "图片无法显示，点击预览"; };
+    button.replaceChildren(image);
+  }
+  rememberThumbnail(file, blob) {
+    if (this.thumbnails.has(file.id)) URL.revokeObjectURL(this.thumbnails.get(file.id).url);
+    this.thumbnails.set(file.id, { file, url: URL.createObjectURL(blob) });
+    let bytes = [...this.thumbnails.values()].reduce((sum, entry) => sum + entry.file.size, 0);
+    while (this.thumbnails.size > 24 || bytes > 64 * 1048576) {
+      const oldest = this.thumbnails.keys().next().value, entry = this.thumbnails.get(oldest);
+      bytes -= entry.file.size; URL.revokeObjectURL(entry.url); this.thumbnails.delete(oldest);
+    }
+    const cached = this.thumbnails.get(file.id);
+    if (cached) for (const button of document.querySelectorAll(".file-image-preview")) if (button.dataset.attachmentId === file.id) this.showThumbnail(button, cached);
+  }
+  pumpThumbnails() {
+    if (!this.supported || this.active) return;
+    for (const [id, file] of this.thumbnailQueue) {
+      this.thumbnailQueue.delete(id);
+      if (this.thumbnails.has(id) || ![...document.querySelectorAll(".file-image-preview")].some(button => button.dataset.attachmentId === id)) continue;
+      this.start(file, "thumbnail"); break;
+    }
+  }
   static size(bytes) { return bytes < 1024 ? bytes + " B" : bytes < 1048576 ? (bytes / 1024).toFixed(1) + " KB" : (bytes / 1048576).toFixed(1) + " MB"; }
   feedback(file, message = "") {
     if (message) this.messages.set(file.id, message); else this.messages.delete(file.id);
@@ -94,12 +139,22 @@ window.FileDownloads = class FileDownloads {
     }
   }
   start(file, preview, location = null) {
+    const thumbnail = this.thumbnails.get(file.id);
+    if (thumbnail && preview !== "thumbnail") {
+      if (preview) window.ImageAttachments.open(thumbnail.url, file.name); else this.download(thumbnail);
+      this.feedback(file); return;
+    }
+    if (this.active?.preview === "thumbnail" && preview !== "thumbnail") {
+      if (this.active.file.id === file.id && preview) { this.active.preview = "image"; return; }
+      this.thumbnailQueue.set(this.active.file.id, this.active.file);
+      this.cancel("");
+    }
     if (this.active) { this.feedback(file, "已有文件正在接收，请等待或取消"); return; }
     if (!this.supported || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > this.maxBytes) return;
     if (preview && !FileDownloads.previewKind(file)) { this.showTextPreview({ file, unsupported: true }); return; }
     if (!preview && this.cached?.file.id === file.id) { this.download(this.cached); this.feedback(file); return; }
     this.clearCached();
-    this.active = { file, preview: preview ? FileDownloads.previewKind(file) : null, location: preview ? location : null, chunks: [], offset: 0, requestId: null, timer: null };
+    this.active = { file, preview: preview === "thumbnail" ? "thumbnail" : preview ? FileDownloads.previewKind(file) : null, location: preview ? location : null, chunks: [], offset: 0, requestId: null, timer: null };
     this.next();
   }
   next() {
@@ -122,18 +177,21 @@ window.FileDownloads = class FileDownloads {
       if (message.nextOffset !== expected) throw new Error("文件分块顺序异常");
       if (expected !== null && !(task.preview === "text" && task.offset >= this.textLimit)) { this.next(); return; }
       this.active = null; this.feedback(task.file);
+      queueMicrotask(() => this.pumpThumbnails());
       if (task.preview === "text") {
         const bytes = new Uint8Array(Math.min(task.offset, this.textLimit)); let offset = 0;
         for (const chunk of task.chunks) { const part = chunk.subarray(0, bytes.length - offset); bytes.set(part, offset); offset += part.length; if (offset >= bytes.length) break; }
         this.showTextPreview({ file: task.file, bytes, truncated: bytes.length < task.file.size, location: task.location }); return;
       }
       const blob = new Blob(task.chunks, { type: task.file.mime || "application/octet-stream" });
+      if (task.preview === "thumbnail" || task.preview === "image") this.rememberThumbnail(task.file, blob);
+      if (task.preview === "thumbnail") return;
       this.cached = { file: task.file, url: URL.createObjectURL(blob) };
       if (task.preview === "image") {
         this.clearPreview(); this.previewUrl = URL.createObjectURL(blob);
         window.ImageAttachments.open(this.previewUrl, task.file.name);
       } else this.download(this.cached);
-    } catch (error) { this.active = null; this.feedback(task.file, error.message || "文件接收失败"); }
+    } catch (error) { this.active = null; this.feedback(task.file, error.message || "文件接收失败"); queueMicrotask(() => this.pumpThumbnails()); }
   }
   error(message) {
     if (!message.requestId?.startsWith("file-")) return false;
@@ -143,11 +201,18 @@ window.FileDownloads = class FileDownloads {
   cancel(message = "已取消下载") {
     const task = this.active; if (!task) return;
     clearTimeout(task.timer); this.active = null; this.feedback(task.file, message);
+    queueMicrotask(() => this.pumpThumbnails());
   }
-  disconnect() { if (this.active) this.cancel("连接已断开，请重新下载"); }
+  disconnect() {
+    this.thumbnailQueue.clear(); this.thumbnailObserver.disconnect();
+    if (this.active) this.cancel(this.active.preview === "thumbnail" ? "" : "连接已断开，请重新下载");
+  }
   reset() {
     this.disconnect(); this.clearCached(); this.clearPreview();
     this.highlighter.cancel(); this.textPreview = null; this.supported = false; this.messages.clear();
+    for (const cached of this.thumbnails.values()) URL.revokeObjectURL(cached.url);
+    this.thumbnails.clear();
+    for (const image of document.querySelectorAll(".file-image-preview img")) image.removeAttribute("src");
     $("textPreviewContent").textContent = "";
   }
   download(cached) { const link = document.createElement("a"); link.href = cached.url; link.download = cached.file.name; document.body.append(link); link.click(); link.remove(); }

@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { marked } from "marked";
-import { localFileTarget, markdownPathReference } from "./linkTargets.mjs";
+import { localFileTarget, markdownPathReference, markdownLinkReference } from "./linkTargets.mjs";
 
 export const FILE_LIMITS = { maxBytes: 32 * 1024 * 1024, chunkBytes: 192 * 1024, perEvent: 12, entries: 512 };
 const imageTypes = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
@@ -21,8 +22,10 @@ export function fileReferences(text) {
   try {
     marked.walkTokens(marked.lexer(String(text || "").slice(0, 262144)), token => {
       if (refs.length >= FILE_LIMITS.perEvent || labels.has(token)) return;
+      const standalone = token.type === "paragraph" ? markdownPathReference(token.text) : null;
       if (["link", "image"].includes(token.type) && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
-      const value = ["link", "image"].includes(token.type) ? token.href : token.type === "codespan" ? token.text : token.type === "text" && !token.tokens ? markdownPathReference(token.text) : null;
+      if (standalone && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
+      const value = standalone || (["link", "image"].includes(token.type) ? markdownLinkReference(token) : token.type === "codespan" ? token.text : token.type === "text" && !token.tokens ? markdownPathReference(token.raw ?? token.text) : null);
       const target = localFileTarget(value);
       if (typeof value === "string" && value.length <= 4096 && target !== null) {
         try { if (extensions.has(path.extname(decodeURIComponent(target)).toLowerCase())) refs.push(value); } catch {}
@@ -33,7 +36,22 @@ export function fileReferences(text) {
 }
 
 export class FileAttachments {
-  constructor() { this.entries = new Map(); this.keys = new Map(); this.roots = new Map(); this.reading = 0; }
+  constructor({ codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex") } = {}) {
+    this.entries = new Map(); this.keys = new Map(); this.roots = new Map(); this.reading = 0;
+    this.generatedImages = path.resolve(codexHome, "generated_images");
+  }
+  readable(file) {
+    if (!privateFile(file)) return true;
+    if (!imageTypes[path.extname(file).toLowerCase()]) return false;
+    try {
+      // 默认生成目录位于隐藏的 Codex 目录，只开放其非隐藏图片，不开放整个 CODEX_HOME。
+      const roots = [this.generatedImages, fs.realpathSync(this.generatedImages)];
+      return roots.some(root => {
+        const relative = path.relative(root, file);
+        return relative && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative) && !privatePath(relative);
+      });
+    } catch { return false; }
+  }
   remember(threadId, cwd) {
     if (!threadId || !cwd) return;
     try {
@@ -62,7 +80,7 @@ export class FileAttachments {
       if (/[\x00-\x1f\x7f]/.test(target) || /^[/\\]{2}/.test(target) || target.replace(/^[a-z]:/i, "").includes(":")) return null;
       const file = path.resolve(scope.cwd, target);
       const real = fs.realpathSync(file);
-      if (privateFile(file) || privateFile(real)) return null;
+      if (!this.readable(file) || !this.readable(real)) return null;
       const ext = path.extname(real).toLowerCase();
       if (!extensions.has(ext)) return null;
       const stat = fs.statSync(real);
@@ -107,7 +125,7 @@ export class FileAttachments {
     let handle;
     try {
       const real = await fsp.realpath(entry.file);
-      if (real !== entry.real || privateFile(real)) throw new Error("文件路径已变化，请重新打开会话");
+      if (real !== entry.real || !this.readable(entry.file) || !this.readable(real)) throw new Error("文件路径已变化，请重新打开会话");
       handle = await fsp.open(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
       const stat = await handle.stat();
       if (!stat.isFile() || stat.nlink > 1 || fingerprint(stat) !== entry.stamp || await fsp.realpath(entry.file) !== real) throw new Error("文件已变化，请重新打开会话");

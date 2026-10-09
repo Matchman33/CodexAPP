@@ -53,6 +53,17 @@ test("网页地址与文件地址分类一致，不把 IP 端口或协议地址�
   assert.equal(localFileTarget("sandbox:/mnt/data/demo.pdf"), "sandbox:/mnt/data/demo.pdf");
 });
 
+test("Windows 路径恢复只读取链接目标，不把标签中的路径替换为附件", () => {
+  const label = "C:\\example\\.codex\\label.png", actual = "D:\\project\\.codex\\actual.png";
+  assert.deepEqual(fileReferences("[`示例](" + label + ")`](https://example.com)"), []);
+  assert.deepEqual(fileReferences("[![图](<" + label + ">)](https://example.com)"), []);
+  assert.deepEqual(fileReferences("[`示例](" + label + ")`](<" + actual + ">)"), [actual]);
+  const titlePath = actual.replace("actual.png", "act\\ual.png");
+  assert.deepEqual(fileReferences('[图片](<' + actual + '> "示例](' + titlePath + ')")'), [actual]);
+  const collision = actual.replace("\\.codex", ".codex");
+  assert.deepEqual(fileReferences('[图片](<' + actual + '> "示例](' + collision + ')")'), [actual]);
+});
+
 test("独立 Markdown 本地路径可登记，命令和网页不是文件引用", () => {
   for (const ref of ["docs/说明.md", "C:\\User Files\\说明.md", "/C:/User Files/说明.md:12", "file:///C:/docs/readme.md", "/project/readme.md", "README.md"]) {
     assert.equal(markdownPathReference(ref), ref);

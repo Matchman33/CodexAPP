@@ -3,7 +3,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { appendTextPreview, appendReasoningPreview } from "../core/textPreview.mjs";
 import { mergeMessageEvents } from "../core/messageOrder.mjs";
-import { localFileTarget, webLinkTarget, fileLinkLocation, textLocation, markdownPathReference } from "../core/linkTargets.mjs";
+import { localFileTarget, webLinkTarget, fileLinkLocation, textLocation, markdownPathReference, markdownLinkReference } from "../core/linkTargets.mjs";
 import { copyText } from "./clipboard.mjs";
 import { PreviewHighlighter, previewFragment, previewLanguages, previewLanguageForFile } from "./preview-syntax.mjs";
 import { Trash2, LockOpen, Download, Eye, File, FileSpreadsheet, Image, SquareTerminal, Plus, Keyboard, ClipboardPaste, Eraser, ArrowLeft, ArrowRight, Hand, ZoomIn, ZoomOut, RotateCcw, ArrowDownToLine } from "lucide";
@@ -30,14 +30,22 @@ window.ChatUI = {
   mergeMessageEvents,
   icons(root = document) { createIcons({ icons: { ...icons, Trash2, LockOpen, Download, Eye, File, FileSpreadsheet, Image, SquareTerminal, Plus, Keyboard, ClipboardPaste, Eraser, ArrowLeft, ArrowRight, Hand, ZoomIn, ZoomOut, RotateCcw, ArrowDownToLine }, root, attrs: { "aria-hidden": "true", "stroke-width": 1.8 } }); },
   markdown(text, files = []) {
-    const renderer = new marked.Renderer(), link = renderer.link, codespan = renderer.codespan, plainText = renderer.text;
+    const renderer = new marked.Renderer(), link = renderer.link, codespan = renderer.codespan, plainText = renderer.text, paragraph = renderer.paragraph;
     let insideLink = 0;
     const attachmentLink = (index, label, location, reference) => {
       const attributes = location ? Object.entries(location).map(([key, value]) => ' data-source-' + key.replace(/[A-Z]/g, c => '-' + c.toLowerCase()) + '="' + value + '"').join("") : "";
       return '<a href="#codex-file-' + index + '" data-codex-reference="' + escapeLabel(reference) + '"' + attributes + '>' + label + "</a>";
     };
+    renderer.paragraph = function (token) {
+      const reference = markdownPathReference(token.text);
+      if (!reference) return paragraph.call(this, token);
+      const index = files.findIndex(file => file.reference === reference || file.references?.includes(reference));
+      const label = escapeLabel(reference);
+      return "<p>" + (index >= 0 ? attachmentLink(index, label, fileLinkLocation(reference), reference) : unavailableLink(label, reference)) + "</p>\n";
+    };
     // 在清理 HTML 前把已登记的本地路径换成片段标记，浏览器不直接访问电脑路径。
     const renderLink = function (token) {
+      token = { ...token, href: markdownLinkReference(token) };
       const label = this.parser.parseInline(token.tokens);
       if (unavailableMarker(token.href)) return unavailableLink(label, null);
       const web = webLinkTarget(token.href);
@@ -70,15 +78,16 @@ window.ChatUI = {
     renderer.text = function (token) {
       const label = plainText.call(this, token);
       if (insideLink || token.tokens) return label;
-      const reference = markdownPathReference(token.text);
+      const reference = markdownPathReference(token.raw ?? token.text);
       if (!reference) return label;
       const index = files.findIndex(file => file.reference === reference || file.references?.includes(reference));
       return index >= 0 ? attachmentLink(index, label, fileLinkLocation(reference), reference) : unavailableLink(label, reference);
     };
     renderer.image = function (token) {
-      const index = files.findIndex(file => file.reference === token.href || file.references?.includes(token.href));
-      if (index < 0 && !isLocalFile(token.href)) return "";
-      return index >= 0 ? '<a href="#codex-preview-' + index + '">' + escapeLabel(token.text) + "</a>" : unavailableLink(escapeLabel(token.text), token.href);
+      const reference = markdownLinkReference(token);
+      const index = files.findIndex(file => file.reference === reference || file.references?.includes(reference));
+      if (index < 0 && !isLocalFile(reference)) return "";
+      return index >= 0 ? '<a href="#codex-preview-' + index + '">' + escapeLabel(token.text) + "</a>" : unavailableLink(escapeLabel(token.text), reference);
     };
     return DOMPurify.sanitize(marked.parse(text || "", { gfm: true, breaks: true, renderer }), {
       USE_PROFILES: { html: true }, FORBID_TAGS: ["img", "style", "input", "button", "form", "video", "audio", "iframe"],

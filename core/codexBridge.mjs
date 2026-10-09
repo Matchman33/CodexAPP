@@ -48,6 +48,7 @@ export class CodexClient {
     const bin = resolveCodexBin(this.configuredBin);
     if (!bin) throw new Error("未找到可用 Codex；桌面端版本需包含完整配套文件，请更新或修复安装，或配置独立 CLI 路径");
     this.bin = bin;
+    console.log("[codex] binary:", this.bin);
     this.child = spawn(this.bin, ["app-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     const child = this.child;
     this.buf = "";
