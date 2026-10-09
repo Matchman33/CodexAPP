@@ -36,6 +36,7 @@
     "test:writer-web": "npm run build:web && node tests/writerOnOpen-web.integration.mjs",
     "test:writer-process": "node tests/writerControl.windows.integration.mjs",
     "test:sleep-process": "node tests/sleepPrevention.windows.integration.mjs",
+    "test:sleep-web": "npm run build:web && node tests/sleepPrevention-web.integration.mjs",
     "start": "node scripts/run.mjs relay",
     "start:agent": "node scripts/run.mjs agent",
     "start:broker": "node scripts/run.mjs broker",

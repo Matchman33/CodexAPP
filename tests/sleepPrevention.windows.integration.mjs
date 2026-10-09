@@ -7,6 +7,7 @@ import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { SleepPrevention } from "../core/sleepPrevention.mjs";
+import { chromium } from "@playwright/test";
 
 if (process.platform !== "win32") {
   console.log("SKIP: Windows sleep-prevention integration test");
@@ -15,8 +16,17 @@ if (process.platform !== "win32") {
 
 const quiet = { log() {}, warn() {} };
 const guard = new SleepPrevention({ logger: quiet });
+// 生产服务有监听端口；独立测试也要保持父进程存活，以观察后台助手重建。
+const recoveryKeepAlive = setInterval(() => {}, 1000);
 try {
   assert.equal((await guard.start()).active, true, guard.status().error);
+  const original = guard.child, originalClosed = once(original, "close");
+  original.kill(); await originalClosed;
+  const recoveryDeadline = Date.now() + 20000;
+  while (!guard.status().active && Date.now() < recoveryDeadline) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(guard.status().active, true, guard.status().error);
+  assert.notEqual(guard.child, original, "unexpected exit must rebuild the owned helper");
+  console.log("PASS: native helper is automatically rebuilt after unexpected termination");
   const child = guard.child;
   const output = [];
   child.stdout.on("data", (d) => output.push(d.toString()));
@@ -25,7 +35,7 @@ try {
   assert.match(output.join(""), /released/);
   assert.equal(child.exitCode, 0);
   console.log("PASS: native request acquired and explicitly released on the same thread");
-} finally { await guard.stop(); }
+} finally { await guard.stop(); clearInterval(recoveryKeepAlive); }
 
 // This independent parent has no Codex session. Killing it must release via EOF.
 const moduleUrl = new URL("../core/sleepPrevention.mjs", import.meta.url).href;
@@ -75,7 +85,7 @@ const agent = spawn(process.execPath, [fileURLToPath(new URL("../cloud/agent.mjs
   windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
   env: { ...process.env, CODEXAPP_DIR: dir, CODEXAPP_NO_OPEN: "1", CODEXAPP_PREVENT_SLEEP: "1", CODEXAPP_EMAIL: "", CODEXAPP_PASSWORD: "" },
 });
-let agentErrors = "";
+let agentErrors = "", browser;
 agent.stdout.on("data", () => {});
 agent.stderr.on("data", (d) => { agentErrors = (agentErrors + d.toString()).slice(-4096); });
 try {
@@ -92,7 +102,14 @@ try {
   assert.equal(status?.codexConnected, false);
   assert.equal(status?.sleepPrevention.active, true, status?.sleepPrevention.error || agentErrors);
   console.log("PASS: isolated Agent service reports active sleep prevention without login or Codex tasks");
+  browser = await chromium.launch({ channel: process.env.CODEXAPP_TEST_BROWSER || "msedge", headless: true });
+  const page = await browser.newPage();
+  await page.goto("http://127.0.0.1:" + port);
+  await page.waitForFunction(() => document.querySelector("#powerStatus")?.textContent.includes("已生效"));
+  assert.match(await page.locator("#powerStatus").textContent(), /防休眠已生效/);
+  console.log("PASS: Agent panel shows sleep-prevention status before login");
 } finally {
+  await browser?.close();
   if (agent.exitCode == null && agent.signalCode == null) { const closed = once(agent, "close"); agent.kill(); await closed; }
   const resolved = path.resolve(dir);
   if (path.dirname(resolved) !== temporaryBase || !path.basename(resolved).startsWith("codexapp-power-")) throw new Error("unsafe test cleanup path");

@@ -89,6 +89,12 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 > 客户端只需把 `options` 渲染成按钮，点击后回传 `optionId`。具体到 Codex 的决策值由中继映射，
 > 客户端不关心。`permission` 类只会给 `deny` 选项。
 
+### 防休眠状态通知
+
+服务级 `hello.sleepPrevention` 和推送 `{type:"sleepPrevention",status}` 携带 `{supported,enabled,active,error,phase,retryCount,nextRetryAt}`。`phase` 表示 `idle`、`starting`、`retrying`、`active`、`stopped`、`disabled` 或 `unsupported`；`nextRetryAt` 为下一次助手尝试的时间戳，无待执行重试时为 `null`。这些消息不绑定单个会话，直连向已鉴权连接推送，云端沿共享中继和原有 E2E 通道传送，Broker 无需解析新增字段。
+
+`active:true` 仅在 Windows 助手确认已取得防休眠请求后发送。启动失败或意外退出先更新为未生效并持续重试；网页应持续提示风险，重新连接从快照恢复，不能用 Codex 已连接或项目重启完成代替防休眠已生效。防休眠失败不阻止项目继续启动和会话控制。
+
 ## 客户端 → 服务端
 
 ### 交互提问与授权

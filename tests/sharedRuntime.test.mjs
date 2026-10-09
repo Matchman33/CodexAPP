@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { createLocalRelay, existingRelay } from "../relay/transport.mjs";
 import { SharedAgentHub } from "../core/sharedAgentHub.mjs";
 
@@ -10,10 +11,10 @@ const until = async fn => {
   for (let i = 0; i < 100; i++) { if (fn()) return; await new Promise(resolve => setTimeout(resolve, 25)); }
   throw new Error("fixture timeout");
 };
-function setup(t) {
+function setup(t, sleep = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codexapp-shared-"));
   const calls = [], messages = [], config = { host: "127.0.0.1", port: 0, token: "fixture", defaultCwd: dir, terminalEnabled: false };
-  const relay = createLocalRelay({ config, dataDir: dir });
+  const relay = createLocalRelay({ config, dataDir: dir, ...sleep });
   let starts = 0;
   relay.hub.control.start = async () => { starts++; relay.hub.control.state.codexConnected = true; };
   relay.hub.control.codex.request = async (method, params) => {
@@ -37,6 +38,21 @@ function setup(t) {
     await proxy.start(); return proxy;
   } };
 }
+
+test("防休眠失败与恢复状态进入直连快照，并经共享中继转发至云端客户端", async t => {
+  const sleepEvents = new EventEmitter();
+  let status = { supported: true, enabled: true, active: false, phase: "retrying", error: "helper startup timed out", retryCount: 1, nextRetryAt: Date.now() + 1000 };
+  const fixture = setup(t, { sleepStatus: () => status, sleepEvents });
+  const proxy = await fixture.connect();
+  const hello = await proxy.attach("phone");
+  assert.deepEqual(hello.sleepPrevention, status);
+  status = { ...status, active: true, phase: "active", error: null, retryCount: 0, nextRetryAt: null };
+  sleepEvents.emit("status", status);
+  await until(() => fixture.messages.some(m => m.type === "sleepPrevention" && m.clientId === "phone"));
+  assert.deepEqual(fixture.messages.find(m => m.type === "sleepPrevention" && m.clientId === "phone").status, status);
+  await proxy.stop(); await fixture.relay.close();
+  assert.equal(sleepEvents.listenerCount("status"), 0);
+});
 
 test("Agent 复用正在运行的直连核心，两个客户端选中状态独立，退出适配器不停止中继", async t => {
   const { connect, relay, messages, starts } = setup(t);

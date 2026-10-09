@@ -11,8 +11,8 @@ import { watchSocket } from "./socketLiveness.mjs";
 export class SharedAgentHub {
   clients = new Map();
   state = { codexConnected: false };
-  constructor({ config, base, root, emit, sleepStatus, webDir }) {
-    Object.assign(this, { emit, sleepStatus });
+  constructor({ config, base, root, emit, sleepStatus, sleepEvents, webDir }) {
+    Object.assign(this, { emit, sleepStatus, sleepEvents });
     const projectConfig = path.join(root, "codexapp.config.json");
     const sourceProject = fs.existsSync(path.join(root, "relay", "server.mjs"));
     this.configPath = config.relayConfigPath || process.env.CODEXAPP_RELAY_CONFIG || (sourceProject || fs.existsSync(projectConfig) ? projectConfig : path.join(base, "relay.config.json"));
@@ -47,7 +47,7 @@ export class SharedAgentHub {
     catch (error) {
       if (error.code !== "ECONNREFUSED") throw error;
       const owner = createLocalRelay({ config: this.config, dataDir: this.dataDir, webDir: this.webDir,
-        saveModel: (model, settings) => persistModel(this.configPath, model, settings), sleepStatus: this.sleepStatus });
+        saveModel: (model, settings) => persistModel(this.configPath, model, settings), sleepStatus: this.sleepStatus, sleepEvents: this.sleepEvents });
       try { this.config.port = await owner.start(); this.owner = owner; }
       catch (e) { if (e.code !== "EADDRINUSE") throw e; }
       this.control = await this.openSocket("cloud-control-" + crypto.randomUUID(), true);

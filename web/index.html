@@ -101,6 +101,7 @@
     <div class="subbar">
       <span id="threadTitle">新对话</span><span id="cwdLabel" class="muted small mono"></span>
     </div>
+    <p id="sleepWarning" class="sleep-warning hidden" role="alert"></p>
 
     <nav id="sessionTabs" class="session-tabs hidden" aria-label="已打开会话"></nav>
     <p id="watchStatus" class="watch-status hidden" role="status"></p>
@@ -195,6 +196,7 @@
       <p id="cfgError" class="small settings-error hidden" role="alert"></p>
       <button id="releaseThreadBtn" class="btn secondary full" disabled><i data-lucide="lock-open"></i>解除当前会话占用</button>
       <button id="restartServiceBtn" class="btn secondary full" disabled><i data-lucide="refresh-cw"></i>重启本项目</button>
+      <p id="sleepStatus" class="small muted" role="status"></p>
       <button id="cancelRestartBtn" class="btn secondary full hidden"><i data-lucide="x"></i>取消计划重启</button>
       <p id="threadActionStatus" class="small muted" role="status"></p>
       <button id="enableNotif" class="btn secondary full">开启审批通知</button>

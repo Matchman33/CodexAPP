@@ -9,23 +9,84 @@ function fixture({ behavior = "ready", ...options } = {}) {
   const lifetime = new EventEmitter();
   const spawnHelper = (...args) => {
     calls.push(args);
-    if (behavior === "throw") throw new Error("spawn denied");
+    const attempt = Array.isArray(behavior) ? behavior[Math.min(calls.length - 1, behavior.length - 1)] : behavior;
+    if (attempt === "throw") throw new Error("spawn denied");
     const child = new EventEmitter();
     child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.kills = 0; child.unrefs = 0;
     child.unref = () => { child.unrefs++; };
     child.kill = () => { child.kills++; queueMicrotask(() => child.emit("close", 1)); return true; };
-    child.stdin.on("finish", () => { if (behavior !== "ignoreStop") queueMicrotask(() => child.emit("close", 0)); });
+    child.stdin.on("finish", () => { if (attempt !== "ignoreStop") queueMicrotask(() => child.emit("close", 0)); });
     children.push(child);
     setImmediate(() => {
-      if (behavior === "exit") { child.stderr.write("API failed"); child.emit("close", 1); }
-      else if (behavior !== "timeout") { child.stdout.write('noise\n{"event":"rea'); child.stdout.write('dy"}\n'); }
+      if (attempt === "exit") { child.stderr.write("API failed"); child.emit("close", 1); }
+      else if (attempt !== "timeout") { child.stdout.write('noise\n{"event":"rea'); child.stdout.write('dy"}\n'); }
     });
     return child;
   };
   const guard = new SleepPrevention({ platform: "win32", spawnHelper, lifetime, logger: { log: (m) => logs.push(m), warn: (m) => logs.push(m) }, ...options });
   return { guard, children, calls, logs, lifetime };
 }
+
+async function until(fn) {
+  const deadline = Date.now() + 1000;
+  while (!fn()) { if (Date.now() > deadline) throw new Error("recovery timeout"); await new Promise(resolve => setTimeout(resolve, 5)); }
+}
+
+test("防休眠启动超时后单独自动重试，状态保留失败提示直到恢复", async t => {
+  const { guard, children } = fixture({ behavior: ["timeout", "ready"], startupTimeout: 20, retryBaseDelay: 10, maxRetryDelay: 20 });
+  t.after(() => guard.stop());
+  const first = await guard.start();
+  assert.equal(first.active, false); assert.equal(first.phase, "retrying"); assert(first.nextRetryAt); assert.match(first.error, /timed out/);
+  await until(() => guard.status().active);
+  assert.equal(children.length, 2); assert.equal(children[0].kills, 1);
+  assert.equal(guard.status().error, null); assert.equal(guard.status().nextRetryAt, null);
+});
+
+test("防休眠助手意外退出后自动恢复，停止后不再重试", async t => {
+  const { guard, children } = fixture({ retryBaseDelay: 10, maxRetryDelay: 20 });
+  t.after(() => guard.stop());
+  await guard.start(); children[0].emit("close", 1);
+  assert.equal(guard.status().phase, "retrying");
+  await until(() => children.length === 2 && guard.status().active);
+  await guard.stop();
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(children.length, 2); assert.equal(guard.status().phase, "stopped");
+});
+
+test("防休眠持续失败会退避重试，父进程退出取消待执行重试", async t => {
+  const { guard, calls, lifetime } = fixture({ behavior: "throw", retryBaseDelay: 5, maxRetryDelay: 10 });
+  t.after(() => guard.stop());
+  await guard.start(); await until(() => calls.length >= 3);
+  assert.equal(guard.status().phase, "retrying"); assert(guard.status().retryCount >= 3);
+  const count = calls.length; lifetime.emit("exit");
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(calls.length, count);
+});
+
+test("停止正在超时的防休眠助手不等待完整启动超时，也不重新启动", async t => {
+  const { guard, calls } = fixture({ behavior: "timeout", startupTimeout: 200, retryBaseDelay: 10 });
+  t.after(() => guard.stop());
+  const starting = guard.start();
+  const stopped = await Promise.race([guard.stop().then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 40))]);
+  assert.equal(stopped, true);
+  await starting; await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(calls.length, 1); assert.equal(guard.status().active, false);
+});
+
+test("停止与重新启动重叠时等待旧助手退出，再取得新的防休眠请求", async t => {
+  for (const behavior of ["ready", ["timeout", "ready"]]) {
+    const { guard, children } = fixture({ behavior, startupTimeout: 200, retryBaseDelay: 10 });
+    t.after(() => guard.stop());
+    const first = guard.start();
+    if (behavior === "ready") await first;
+    const stopping = guard.stop(), restarting = guard.start();
+    await stopping; await restarting;
+    assert.equal(guard.status().active, true);
+    assert.equal(children.length, 2);
+    assert.equal(guard.status().phase, "active");
+  }
+});
 
 test("native script holds a continuous system request, permits screen-off and releases on EOF", () => {
   assert.match(WINDOWS_SLEEP_SCRIPT, /SystemRequired = 0x00000001/);

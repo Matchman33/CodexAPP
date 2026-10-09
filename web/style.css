@@ -280,6 +280,7 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .ac-meta { color: var(--muted); font-size: 11px; white-space: pre-wrap; margin: 8px 0; }
 .ac-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .ac-actions .btn { flex: 1; }
+.sleep-warning { flex: 0 0 auto; margin: 0; padding: 8px 16px; color: var(--warn); border-bottom: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
 .interaction-form { display: grid; gap: 10px; min-width: 0; }
 .interaction-form fieldset { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; margin: 0; padding: 10px; }
 .interaction-form legend { font-size: 13px; overflow-wrap: anywhere; }

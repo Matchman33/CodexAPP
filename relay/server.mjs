@@ -24,7 +24,7 @@ config.defaultCwd ||= os.homedir();
 const dataDir = process.env.CODEXAPP_DATA_DIR || path.join(os.homedir(), ".codexapp", "relay-" + crypto.createHash("sha256").update(ROOT).digest("hex").slice(0, 12));
 const sleepPrevention = createSleepPrevention(config);
 const relay = createLocalRelay({ config, dataDir, webDir: path.join(ROOT, "web"),
-  saveModel: (model, settings) => persistModel(CONFIG_PATH, model, settings), sleepStatus: () => sleepPrevention.status() });
+  saveModel: (model, settings) => persistModel(CONFIG_PATH, model, settings), sleepStatus: () => sleepPrevention.status(), sleepEvents: sleepPrevention });
 process.on("message", async m => {
   if (m?.type !== "codexapp-stop" || process.env.CODEXAPP_MANAGED !== "1") return;
   try { await relay.close(); process.exit(0); } catch (error) { console.error(error.message); }

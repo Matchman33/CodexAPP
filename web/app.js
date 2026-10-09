@@ -62,6 +62,7 @@ let queueExpanded = true;
 let appState = {};
 const sessionClientId = "web-" + newClientId();
 let multiSession = false, serviceRestart = { phase: "idle" };
+let sleepPreventionStatus = null;
 let historyEpoch = null;
 let sessionSummaries = [], watchRequest = null, watchAfter = 0, watchDelay = 2000;
 const sessionViews = new Map(), closedTabs = new Set();
@@ -132,6 +133,25 @@ function renderServiceRestart() {
   $("cancelRestartBtn").classList.toggle("hidden", serviceRestart.phase !== "waiting");
   $("serviceStatus").textContent = serviceRestart.error || (serviceRestart.phase === "waiting" ? "等待当前任务结束后重启" : serviceRestart.phase === "restarting" ? "正在重启，等待重新连接" : "");
   $("serviceStatus").classList.toggle("hidden", !$("serviceStatus").textContent); updateComposer();
+}
+function renderSleepPrevention() {
+  const s = sleepPreventionStatus;
+  let text = "防休眠：电脑端未提供状态", warning = "";
+  if (s?.supported === false) text = "防休眠：当前系统不支持此功能";
+  else if (s?.enabled === false) { text = "防休眠已关闭"; warning = "防休眠已关闭，电脑可能自动休眠。"; }
+  else if (s?.supported && s.enabled) {
+    if (!sessionReady) { text = "防休眠状态待确认"; warning = "连接已断开，暂时无法确认电脑的防休眠状态。"; }
+    else if (s.active) text = "防休眠已生效（允许屏幕熄灭）";
+    else {
+      const reason = /timed out/.test(s.error || "") ? "防休眠启动超时" : "防休眠未生效";
+      text = "防休眠未生效：" + (s.phase === "retrying" || s.error ? "正在自动重试" : "正在启动");
+      warning = reason + "，" + (s.phase === "retrying" || s.error ? "正在自动重试" : "正在启动") + "。电脑可能自动休眠。";
+    }
+  }
+  $("sleepStatus").textContent = text;
+  $("sleepStatus").title = s?.error || "";
+  $("sleepWarning").textContent = warning;
+  $("sleepWarning").classList.toggle("hidden", !warning);
 }
 let modelCatalog = [];
 let defaultModel = null;
@@ -547,7 +567,7 @@ function resetCloudTarget() {
   modelsTimer = configTimer = writerTimer = threadActionTimer = null;
   pendingConfig = writerConflict = writerChoice = writerPending = threadActionChoice = threadActionPending = null;
   pendingPrompt = pendingDirect = lastSelectionId = watchRequest = liveAssistant = null;
-  appState = {}; multiSession = false; serviceRestart = { phase: "idle" }; threadManagement = {};
+  appState = {}; multiSession = false; serviceRestart = { phase: "idle" }; sleepPreventionStatus = null; renderSleepPrevention(); threadManagement = {};
   historyEpoch = null; sessionSummaries = []; historyPages = []; pagedHistory = false;
   oldestPage = newestPage = watchAfter = 0; watchDelay = 2000; followLatest = true;
   promptQueueState = null; queueExpanded = true; imageUploadSupported = false;
@@ -631,6 +651,7 @@ function handle(m) {
   }
   switch (m.type) {
     case "hello":
+      sleepPreventionStatus = m.sleepPrevention || null;
       multiSession = !!m.multiSession?.supported;
       if (multiSession) {
         serviceRestart = m.serviceRestart || serviceRestart;
@@ -704,6 +725,8 @@ function handle(m) {
       serviceRestart = m; renderServiceRestart();
       if (m.phase === "restarting") setTimeout(() => { if (serviceRestart.phase === "restarting" && !sessionReady) { serviceRestart.error = "重启后尚未恢复连接，请查看电脑端启动日志"; renderServiceRestart(); } }, 30000);
       break;
+    case "sleepPrevention":
+      sleepPreventionStatus = m.status; renderSleepPrevention(); break;
     case "connectionState":
       appState.codexConnected = m.codexConnected; applyState(); break;
     case "historyUpdate":
@@ -873,6 +896,7 @@ function handle(m) {
 }
 
 function setConn(ok, label) {
+  renderSleepPrevention();
   if (label) connectionLabel = label;
   $("connDot").classList.toggle("on", !!ok);
   if (label) $("statusPill").textContent = label;
@@ -882,6 +906,7 @@ function setConn(ok, label) {
 }
 
 function applyState() {
+  renderSleepPrevention();
   renderPermissions();
   const connected = sessionReady && !!(ws && ws.readyState === WebSocket.OPEN) && appState.codexConnected
     && (profile.mode !== "cloud" || (!!agentPub && paired));

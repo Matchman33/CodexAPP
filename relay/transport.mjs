@@ -26,13 +26,15 @@ export function existingRelay(config) {
     });
   });
 }
-export function createLocalRelay({ config, dataDir, webDir, saveModel, sleepStatus = () => ({}) }) {
+export function createLocalRelay({ config, dataDir, webDir, saveModel, sleepStatus = () => ({}), sleepEvents }) {
   const clients = new Map(), runtimeId = crypto.randomUUID();
-  const decorate = message => message.type === "hello" ? { ...message, sharedRuntime: { version: 1, runtimeId } } : message;
+  const decorate = message => message.type === "hello" ? { ...message, sharedRuntime: { version: 1, runtimeId }, sleepPrevention: sleepStatus() } : message;
   const send = (ws, message) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(decorate(message))); };
   const hub = new SessionHub(config, message => {
     for (const [ws, id] of clients) if (!message.clientId || message.clientId === id) send(ws, message);
   }, saveModel, { dataDir });
+  const sleepChanged = status => { for (const ws of clients.keys()) send(ws, { type: "sleepPrevention", status }); };
+  sleepEvents?.on("status", sleepChanged);
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/health") {
@@ -68,6 +70,7 @@ export function createLocalRelay({ config, dataDir, webDir, saveModel, sleepStat
   });
   async function close() {
     await hub.stop();
+    sleepEvents?.off("status", sleepChanged);
     for (const ws of wss.clients) ws.terminate();
     await new Promise(resolve => wss.close(resolve));
     if (server.listening) await new Promise(resolve => server.close(resolve));

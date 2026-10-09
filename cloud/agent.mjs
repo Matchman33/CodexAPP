@@ -135,7 +135,7 @@ function retryAgent(delay) {
 const SOURCE_ROOT = typeof __dirname === "string" ? path.dirname(__dirname) : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bridge = new SharedAgentHub({ config, base: BASE, root: SOURCE_ROOT,
   webDir: typeof __dirname === "string" ? path.join(__dirname, "web") : undefined,
-  sleepStatus: () => sleepPrevention.status(), emit: (msg) => {
+  sleepStatus: () => sleepPrevention.status(), sleepEvents: sleepPrevention, emit: (msg) => {
   status.codexConnected = !!bridge.state.codexConnected;
   phones?.broadcast(msg);
 } });
@@ -423,6 +423,7 @@ input{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9p
 <div class="card">
   <h1>CodexApp 电脑客户端</h1>
   <p class="sub">登录后自动连接，手机/网页即可远程控制本机 Codex</p>
+  <p id="powerStatus" class="hint" role="status"></p>
 
   <div id="auth">
     <div class="tabs"><div id="tabLogin" class="tab on">登录</div><div id="tabReg" class="tab">注册</div></div>
@@ -521,6 +522,10 @@ $("setCode").onclick=function(){
 var LABEL={needLogin:"未登录",startingCodex:"正在启动本地 Codex…",loggingIn:"正在登录…",connecting:"连接中…",waitingPeer:"已连接，等待客户端…",pairing:"等待配对（请输入配对码）",paired:"已连接 ✓ 可远程控制",error:"出错"};
 var COLOR={paired:"var(--accent)",waitingPeer:"var(--accent2)",pairing:"var(--accent2)",error:"var(--danger)"};
 function render(s){
+  var power=s.sleepPrevention;
+  $("powerStatus").textContent=!power?"防休眠状态未知":!power.supported?"当前系统不支持防休眠":!power.enabled?"防休眠已关闭，电脑可能自动休眠":power.active?"防休眠已生效（允许屏幕熄灭）":"防休眠未生效，"+(power.error||power.phase==="retrying"?"正在自动重试":"正在启动")+"。电脑可能自动休眠。";
+  $("powerStatus").style.color=power&&power.enabled&&power.supported&&!power.active?"var(--danger)":"var(--muted)";
+  $("powerStatus").title=power&&power.error||"";
   if(s.phase==="needLogin"){$("auth").className="";$("panel").className="hidden";
     if(s.email&&!$("email").value)$("email").value=s.email;
     if(s.error)$("msg").textContent="⚠ "+s.error;
