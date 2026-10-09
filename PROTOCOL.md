@@ -91,6 +91,18 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 
 ## 客户端 → 服务端
 
+### 交互提问与授权
+
+`approval` 卡片新增 `kind:"question"|"form"|"url"`，仍使用现有 `pendingApprovals`、`approvalResolved` 和多会话路由。重新连接时从 `hello.pendingApprovals` 恢复未回答卡片；不自动选择或提交答案。服务器发出 `serverRequest/resolved` 后移除对应卡片。
+
+`question` 对应 Codex `item/tool/requestUserInput`，携带 `questions[]`：`{id,header,question,isOther,isSecret,options:[{label,description}]}`。网页支持单选、其他回答和自由输入；`isSecret` 使用密码输入框。客户端发送 `{type:"interactionResponse",key,requestId,answers:{问题编号:{answers:[回答文本]}}}`。答案按原文传送，不写入聊天事件或浏览器持久存储；后端检查必答项、选项和长度后回复 Codex。
+
+`form` 和 `url` 对应 `mcpServer/elicitation/request`。表单携带 `schema`，普通字符串、数值、整数、布尔和枚举字段直接渲染；复杂字段提供 JSON 输入及字段说明。客户端发送 `{type:"interactionResponse",key,requestId,action:"accept"|"decline"|"cancel",content:表单对象}`；非接受操作及链接授权的 `content` 为 `null`。后端检查字段类型、必填项、枚举和已支持约束；未支持的 JSON Schema 约束明确报错，不以有效回答转发。授权链接只允许 HTTP(S)，由用户打开后明确确认；不自动访问链接。
+
+提交后等待 `approvalResolved` 再移除卡片；校验失败通过现有 `error.requestId` 显示在卡片内，允许修正重试。提问和表单不能通过普通 `approval` 按钮协议绕过校验。
+
+未知条目以有界文字摘要展示，省略二进制正文和常见凭据字段；当前会话尚未接入的请求显示说明并明确返回错误，不再静默消失。计划增量合并至原消息，工具进度更新同一条通知，全局配置警告经过共享会话转发。
+
 ### 生成文件下载
 
 文本预览使用 `readAttachment` 分块协议。网页根据已登记的文件扩展名提供纯文本预览，最多展示前 1 MiB，取得所需分块后停止请求剩余内容；完整下载仍从头获取全部分块。`files[].preview` 表示光栅图片预览，文本预览由网页根据文件类型识别。下载进度和错误显示在聊天附件内。
@@ -112,6 +124,8 @@ ws(s)://<relay-host>:<port>/ws?token=<TOKEN>
 助手普通文字中的图片路径也会自动登记，例如 `图片路径：D:/项目/chart.png`、`图片保存在 outputs/chart.png。`；保留 Windows 路径中的反斜杠和空格。不从代码块或网页链接标签抽取路径，不把 HTTP(S) 图片地址截成项目相对路径。会话无需输出特定附件协议或公开图片 URL，文件内容仍通过已有的 `readAttachment` 通道返回请求方。
 
 已完成的 `item:imageView` 将 Codex `imageView.path` 登记为 `fileRefs`，实时结果与历史页均携带图片附件；`[图片] 路径` 普通回复也能识别。当前会话项目内的 `.smoke` 图片目录允许 PNG、JPEG、WebP、GIF，原路径与真实路径均须满足过滤规则；项目外 `.smoke`、其他隐藏目录及非图片文件不因此开放。
+
+MCP 的图片内容及内嵌图片资源、动态工具的 `inputImage` Data URL，以及没有 `savedPath` 的图片生成结果，可登记为内存图片附件。聊天与历史页只传 `files[]` 元信息，不内嵌 Base64 正文；没有磁盘路径时 `reference` 可省略。图片依然通过 `readAttachment` 点击读取，保留预览和下载，不展示缩略图、不获取远程图片 URL、不新增公网接口。只接收 PNG、JPEG、WebP、GIF，并核验 MIME 与文件签名；单张最多 8 MiB，后端内存图片缓存合计最多 64 MiB，附件总数上限仍为 512。会话删除撤销该会话的图片登记，缓存淘汰或重启后可重新打开历史取得新附件 ID。
 
 前端在将文件引用转换为附件标记时，另保留该链接的行号、列号及行范围，用于文本预览滚动和高亮；同一附件的不同引用不能共享或覆盖彼此的定位信息。定位只影响展示，不修改文件字节和分块读取协议，也不扩大 1 MiB 文本预览上限。
 

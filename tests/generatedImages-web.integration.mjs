@@ -97,6 +97,24 @@ try {
   await page.getByRole("button", { name: "关闭图片预览" }).click();
   assert.equal(requests.length, beforePreview, "再次预览和下载应复用已读取图片");
   assert.equal(await page.locator('.body img, img[src^="file:"], img[src^="https:"]').count(), 0);
+  for (const [index, item] of [
+    { id: "mcp", type: "mcpToolCall", server: "fixture", tool: "image", result: { content: [{ type: "image", mimeType: "image/png", data: image }] } },
+    { id: "dynamic", type: "dynamicToolCall", tool: "image", contentItems: [{ type: "inputImage", imageUrl: "data:image/png;base64," + image }] },
+    { id: "result", type: "imageGeneration", status: "completed", result: image },
+  ].entries()) {
+    const event = store.decorateEvent({ ...itemToEvent(item), threadId: "one" }, { threadId: "one", cwd: project });
+    const before = requests.length;
+    await page.evaluate(({ event, index }) => { const row = createEventRow(event); row.id = "tool-image-" + index; document.body.append(row); }, { event, index });
+    assert.equal(requests.length, before, "工具图片也只能点击后读取");
+    const row = page.locator("#tool-image-" + index);
+    if (await row.locator("details").count()) await row.locator("summary").click();
+    await row.getByRole("button", { name: "预览图片：工具图片-1.png", exact: true }).click();
+    await page.waitForFunction(() => $("imageDialog").open && $("imageDialog").querySelector("img").naturalWidth === 480);
+    await page.getByRole("button", { name: "关闭图片预览" }).click();
+    const download = page.waitForEvent("download");
+    await row.getByRole("button", { name: "下载文件：工具图片-1.png", exact: true }).click();
+    assert.deepEqual(await fs.readFile(await (await download).path()), bytes);
+  }
   await fs.mkdir("dist-check/generated-images", { recursive: true });
   await page.screenshot({ path: "dist-check/generated-images/preview-buttons.png" });
   const backgroundImage = path.join(project, "outputs", "后台图片.png"), foregroundFile = path.join(project, "outputs", "前台文件.txt");

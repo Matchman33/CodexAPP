@@ -678,6 +678,7 @@ function handle(m) {
       }
       historyFeed.replace(m.recentEvents || [], true);
       updateHistoryControls();
+      window.InteractionRequests.reset();
       $("approvals").innerHTML = "";
       (m.pendingApprovals || []).forEach(renderApproval);
       if (m.config) {
@@ -806,6 +807,7 @@ function handle(m) {
       removeApproval(m.key);
       break;
     case "error":
+      if (window.InteractionRequests.error(m)) break;
       if (m.requestId === watchRequest?.requestId) { watchRequest = null; watchDelay = Math.min(30000, watchDelay * 2); watchAfter = Date.now() + watchDelay; $("watchStatus").textContent = "同步失败：" + m.message; break; }
       if (m.requestId?.startsWith("restart-")) { serviceRestart = { ...serviceRestart, phase: "idle", error: m.message }; renderServiceRestart(); break; }
       if (fileDownloads.error(m)) break;
@@ -1233,6 +1235,10 @@ function renderApproval(a) {
     (meta.length ? `<div class="ac-meta">${escapeHtml(meta.join("\n"))}</div>` : "") +
     `<div class="ac-actions"></div>`;
   const actions = card.querySelector(".ac-actions");
+  if (["question", "form", "url"].includes(a.kind)) {
+    window.InteractionRequests.render(card, a, sendWs);
+    $("approvals").prepend(card); return;
+  }
   (a.options || []).forEach((opt) => {
     const b = document.createElement("button");
     b.className = "btn " + (opt.style === "danger" ? "danger" : opt.style === "primary" ? "primary" : "secondary");
@@ -1247,6 +1253,7 @@ function renderApproval(a) {
 }
 
 function removeApproval(key) {
+  window.InteractionRequests.resolved(key);
   const el = document.querySelector(`[data-key="${key}"]`);
   if (el) el.remove();
 }

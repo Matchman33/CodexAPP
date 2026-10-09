@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { historyImages } from "./imageInput.mjs";
 import { fileReferences } from "./fileAttachments.mjs";
+import { messageSummary, toolImageSources } from "./messageContent.mjs";
 
 const recency = (t) => t.recencyAt ?? t.updatedAt ?? t.createdAt ?? 0;
 const lastSegment = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
@@ -133,6 +134,7 @@ function toolResultText(result) {
 }
 
 export function itemToEvent(item) {
+  if (!item || typeof item.type !== "string" || !item.type) return null;
   let text;
   const fields = {};
   switch (item.type) {
@@ -169,14 +171,16 @@ export function itemToEvent(item) {
     }
     case "webSearch": text = "搜索: " + (item.query || JSON.stringify(item.action)); break;
     case "mcpToolCall": text = "工具: " + item.server + "/" + item.tool + (item.result ? "\n" + toolResultText(item.result) : "") + (item.error ? "\n" + item.error.message : ""); break;
-    case "dynamicToolCall": text = "工具: " + [item.namespace, item.tool].filter(Boolean).join("/") + (item.contentItems ? "\n" + item.contentItems.map((c) => c.text || "[图片]").join("\n") : ""); break;
+    case "dynamicToolCall": text = "工具: " + [item.namespace, item.tool].filter(Boolean).join("/") + (item.contentItems ? "\n" + item.contentItems.map((c) => c.text || (c.type === "inputAudio" ? "[音频]" : c.type === "inputImage" ? "[图片]" : "[工具内容]")).join("\n") : ""); break;
     case "collabAgentToolCall": text = "子任务: " + item.tool + (item.prompt ? "\n" + item.prompt : ""); break;
     case "imageView": text = "[图片] " + item.path; fields.fileRefs = typeof item.path === "string" ? [item.path] : []; break;
     case "imageGeneration": text = "[生成图片] " + (item.savedPath || item.revisedPrompt || item.status); fields.fileRefs = item.savedPath ? [item.savedPath] : []; break;
     case "enteredReviewMode": case "exitedReviewMode": text = item.review; break;
     case "contextCompaction": text = "上下文已压缩"; break;
-    default: return null;
+    default: text = "[" + item.type.slice(0, 128) + "]\n" + messageSummary(item); fields.unsupported = true; break;
   }
+  const toolImages = toolImageSources(item);
+  if (toolImages.length) fields.toolImages = toolImages;
   if (["mcpToolCall", "dynamicToolCall", "collabAgentToolCall"].includes(item.type)) {
     fields.tool = String(item.tool || "").slice(0, 256);
     fields.server = String(item.server || item.namespace || "").slice(0, 256);

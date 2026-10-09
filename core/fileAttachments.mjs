@@ -8,6 +8,7 @@ import { marked } from "marked";
 import { localFileTarget, markdownPathReference, markdownLinkReference } from "./linkTargets.mjs";
 
 export const FILE_LIMITS = { maxBytes: 32 * 1024 * 1024, chunkBytes: 192 * 1024, perEvent: 12, entries: 512 };
+const inlineLimit = 8 * 1024 * 1024, inlineBudget = 64 * 1024 * 1024;
 const imageTypes = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
 const documentTypes = { ".pdf": "application/pdf", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xls": "application/vnd.ms-excel", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".csv": "text/csv", ".zip": "application/zip" };
 const extensions = new Set("png jpg jpeg webp gif bmp svg pdf xlsx xls csv ods docx doc odt pptx ppt odp zip 7z tar gz txt md json html css js mjs ts py c cpp h mp3 wav mp4 webm".split(" ").map(ext => "." + ext));
@@ -62,7 +63,7 @@ export function fileReferences(text) {
 
 export class FileAttachments {
   constructor({ codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex") } = {}) {
-    this.entries = new Map(); this.keys = new Map(); this.roots = new Map(); this.reading = 0;
+    this.entries = new Map(); this.keys = new Map(); this.roots = new Map(); this.reading = 0; this.inlineBytes = 0;
     this.generatedImages = path.resolve(codexHome, "generated_images");
   }
   readable(file, scope) {
@@ -93,7 +94,42 @@ export class FileAttachments {
   }
   forget(threadId) {
     this.roots.delete(threadId);
-    for (const [id, entry] of this.entries) if (entry.threadId === threadId) { this.entries.delete(id); this.keys.delete(entry.key); }
+    for (const [id, entry] of this.entries) if (entry.threadId === threadId) this.remove(id, entry);
+  }
+  remove(id, entry = this.entries.get(id)) {
+    if (!entry) return;
+    this.inlineBytes -= entry.bytes?.length || 0;
+    this.entries.delete(id); this.keys.delete(entry.key);
+  }
+  trim() {
+    while (this.entries.size > FILE_LIMITS.entries || this.inlineBytes > inlineBudget) this.remove(this.entries.keys().next().value);
+  }
+  registerInline(source, threadId, index) {
+    if (!this.roots.has(threadId)) return null;
+    let data = source.data, claimed = source.mime;
+    if (source.url) {
+      if (source.url.length > inlineLimit * 4 / 3 + 128) return null;
+      const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(source.url);
+      if (!match) return null;
+      [, claimed, data] = match;
+    }
+    if (typeof data !== "string" || !data.length || data.length > Math.ceil(inlineLimit / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return null;
+    const bytes = Buffer.from(data, "base64");
+    if (!bytes.length || bytes.length > inlineLimit || bytes.toString("base64") !== data) return null;
+    let ext;
+    if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) ext = ".png";
+    else if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) ext = ".jpg";
+    else if (/^GIF8[79]a$/.test(bytes.subarray(0, 6).toString())) ext = ".gif";
+    else if (bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP") ext = ".webp";
+    if (!ext || (claimed && claimed !== imageTypes[ext])) return null;
+    const key = JSON.stringify([threadId, "inline", crypto.createHash("sha256").update(bytes).digest("hex")]);
+    const known = this.entries.get(this.keys.get(key));
+    if (known) return { ...known.public };
+    const id = crypto.randomBytes(24).toString("base64url");
+    const metadata = { id, threadId, name: "工具图片-" + (index + 1) + ext, size: bytes.length, mime: imageTypes[ext], preview: true };
+    this.entries.set(id, { key, bytes, threadId, public: metadata }); this.keys.set(key, id); this.inlineBytes += bytes.length;
+    this.trim();
+    return { ...metadata };
   }
   register(reference, threadId) {
     const scope = this.roots.get(threadId);
@@ -121,13 +157,19 @@ export class FileAttachments {
       const id = crypto.randomBytes(24).toString("base64url");
       const metadata = { id, threadId, name: path.basename(real), size: stat.size, mime: imageTypes[ext] || documentTypes[ext] || "application/octet-stream", preview: !!imageTypes[ext] };
       this.entries.set(id, { key, file, real, stamp, threadId, public: metadata }); this.keys.set(key, id);
-      while (this.entries.size > FILE_LIMITS.entries) { const oldest = this.entries.keys().next().value; this.keys.delete(this.entries.get(oldest).key); this.entries.delete(oldest); }
+      this.trim();
       return { ...metadata, reference };
     } catch { return null; }
   }
   decorateEvent(event, state) {
-    if (event.live || !["item:agentMessage", "item:fileChange", "item:imageGeneration", "item:imageView"].includes(event.kind)) return event;
     const threadId = event.threadId || state.threadId;
+    const { toolImages, ...clean } = event;
+    this.remember(threadId, state.cwd);
+    if (toolImages?.length) {
+      const files = toolImages.slice(0, FILE_LIMITS.perEvent).map((source, i) => this.registerInline(source, threadId, i)).filter(Boolean);
+      event = files.length ? { ...clean, files: [...new Map(files.map(file => [file.id, file])).values()] } : clean;
+    }
+    if (event.live || !["item:agentMessage", "item:fileChange", "item:imageGeneration", "item:imageView"].includes(event.kind)) return event;
     const refs = event.fileRefs?.length ? event.fileRefs : event.kind === "item:agentMessage" ? fileReferences(event.text) : [];
     const files = [], seen = new Set();
     for (const ref of refs.slice(0, FILE_LIMITS.perEvent)) {
@@ -135,7 +177,7 @@ export class FileAttachments {
       if (file && !seen.has(file.id)) { files.push({ ...file, references: [ref] }); seen.add(file.id); }
       else if (file) files.find(known => known.id === file.id).references.push(ref);
     }
-    return files.length ? { ...event, files } : event;
+    return files.length ? { ...event, files: [...new Map([...(event.files || []), ...files].map(file => [file.id, file])).values()].slice(0, FILE_LIMITS.perEvent) } : event;
   }
   decorate(message, state) {
     if (!["hello", "event", "historyPage", "historyUpdate", "threadDeleted"].includes(message.type)) return message;
@@ -150,6 +192,10 @@ export class FileAttachments {
     const entry = this.entries.get(attachmentId);
     if (!entry || entry.threadId !== threadId) throw new Error("附件未登记或已失效，请重新打开会话");
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > entry.public.size || offset % FILE_LIMITS.chunkBytes !== 0) throw new Error("附件读取位置无效");
+    if (entry.bytes) {
+      const next = Math.min(offset + FILE_LIMITS.chunkBytes, entry.bytes.length);
+      return { type: "attachmentChunk", requestId, attachmentId, threadId, offset, total: entry.bytes.length, data: entry.bytes.subarray(offset, next).toString("base64"), nextOffset: next < entry.bytes.length ? next : null };
+    }
     if (this.reading >= 4) throw new Error("附件读取繁忙，请稍后重试");
     this.reading++;
     let handle;

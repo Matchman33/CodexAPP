@@ -30,6 +30,39 @@ function fixture(t) {
   return { hub, calls, messages, dir };
 }
 
+test("提问回复与工具图片沿共享会话路由隔离，云端信封保持完整", async t => {
+  const { hub, messages } = fixture(t), replies = [];
+  const { seal, open, newKeyPair } = await import("../cloud/e2e.mjs");
+  const phone = newKeyPair(), agent = newKeyPair();
+  // RPC 边界以下不启动 Codex；共享 Hub 与附件读取保持实际实现。
+  hub.control.codex.respond = (id, result) => replies.push({ id, result: JSON.parse(JSON.stringify(result)) });
+  await hub.dispatch({ type: "readThread", threadId: "one" }, "a");
+  await hub.dispatch({ type: "readThread", threadId: "two" }, "b");
+  hub.serverRequest({ id: 40, method: "item/tool/requestUserInput", params: { threadId: "one", questions: [{ id: "q", question: "继续？", options: null }] } });
+  const approval = messages.find(m => m.type === "approval");
+  assert.equal(approval.clientId, "a"); assert.equal(approval.threadId, "one");
+  assert(!messages.some(m => m.type === "approval" && m.clientId === "b"));
+  await assert.rejects(hub.dispatch({ type: "interactionResponse", threadId: "two", key: approval.approval.key, answers: { q: { answers: ["继续"] } } }, "b"), /失效/);
+  const response = { type: "interactionResponse", threadId: "one", key: approval.approval.key, answers: { q: { answers: ["继续"] } } };
+  await hub.dispatch(open(seal(response, agent.publicKey, phone.secretKey), phone.publicKey, agent.secretKey), "a");
+  assert.deepEqual(replies, [{ id: 40, result: { answers: { q: { answers: ["继续"] } } } }]);
+  Object.assign(hub.sessions.get("one").state, { readOnly: false, turnId: "turn" });
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9xkAAAAASUVORK5CYII=";
+  hub.notification({ method: "item/completed", params: { threadId: "one", turnId: "turn", item: { id: "image", type: "mcpToolCall", result: { content: [{ type: "image", data: png, mimeType: "image/png" }] } } } });
+  const file = messages.find(m => m.type === "event" && m.event.itemId === "image").event.files[0];
+  await hub.dispatch({ type: "readAttachment", threadId: "one", attachmentId: file.id, offset: 0, requestId: "file-image" }, "a");
+  const chunk = messages.find(m => m.requestId === "file-image"); assert.equal(chunk.clientId, "a");
+  assert(!messages.some(m => m.requestId === "file-image" && m.clientId === "b"));
+  assert.equal(open(seal(chunk, phone.publicKey, agent.secretKey), agent.publicKey, phone.secretKey).data, png);
+});
+
+test("不带会话编号的全局警告能通知网页会话", async t => {
+  const { hub, messages } = fixture(t);
+  await hub.dispatch({ type: "readThread", threadId: "one" }, "a");
+  hub.notification({ method: "configWarning", params: { message: "配置已过期" } });
+  assert(messages.some(m => m.clientId === "a" && m.type === "event" && m.event.text.includes("配置已过期")));
+});
+
 test("多个客户端同会话刷新合并 RPC，窗口内复用缓存并保持独立请求标识", async t => {
   const { hub, calls, messages } = fixture(t);
   await hub.dispatch({ type: "readThread", threadId: "one" }, "a");

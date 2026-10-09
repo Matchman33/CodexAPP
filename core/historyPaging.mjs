@@ -5,7 +5,7 @@ import { imageChars } from "./imageInput.mjs";
 export const HISTORY_LIMITS = { events: 50, chars: 65536, itemChars: 8192, turns: 8, recent: 100 };
 
 export class HistoryPager {
-  constructor(client) { this.client = client; this.secret = crypto.randomBytes(32); }
+  constructor(client, decorateEvent = event => event) { this.client = client; this.decorateEvent = decorateEvent; this.secret = crypto.randomBytes(32); }
   async items(params, turnCursor = null) {
     if (this.itemsMethod === "turn") {
       const p = await this.client.request("thread/turns/list", { threadId: params.threadId, cursor: turnCursor, limit: 1, sortDirection: "desc", itemsView: "full" });
@@ -79,7 +79,8 @@ export class HistoryPager {
         i = anchor + 1;
       }
       for (; i < items.length; i++) {
-        const item = items[i], event = itemToEvent(item);
+        const item = items[i], converted = itemToEvent(item);
+        const event = converted ? this.decorateEvent({ ...converted, threadId }) : null;
         if (!event) continue;
         const text = event.text.slice(0, HISTORY_LIMITS.itemChars);
         if (events.length >= HISTORY_LIMITS.events || (events.length && chars + text.length + imageChars(event) > HISTORY_LIMITS.chars)) break;

@@ -280,6 +280,15 @@ details[open] > summary .tool-chevron { transform: rotate(180deg); }
 .ac-meta { color: var(--muted); font-size: 11px; white-space: pre-wrap; margin: 8px 0; }
 .ac-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .ac-actions .btn { flex: 1; }
+.interaction-form { display: grid; gap: 10px; min-width: 0; }
+.interaction-form fieldset { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--line); border-radius: 6px; margin: 0; padding: 10px; }
+.interaction-form legend { font-size: 13px; overflow-wrap: anywhere; }
+.interaction-form fieldset label { display: flex; align-items: baseline; gap: 8px; font-size: 13px; overflow-wrap: anywhere; }
+.interaction-field { display: grid; gap: 5px; font-size: 13px; }
+.interaction-field small { color: var(--muted); }
+.interaction-form input:not([type="radio"]), .interaction-form select, .interaction-form textarea { width: 100%; min-width: 0; box-sizing: border-box; background: var(--bg2); color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 8px; font: inherit; }
+.interaction-form pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.interaction-status { font-size: 12px; color: var(--warn); overflow-wrap: anywhere; }
 .diff-bar { display: flex; gap: 8px; align-items: center; align-self: center; max-width: calc(100% - 32px); margin: 0 16px 4px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--accent2); background: var(--bg2); font-size: 12px; }
 .diff-bar svg { width: 16px; height: 16px; }
 .diff { background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre; overflow: auto; max-height: 64dvh; }

@@ -65,6 +65,7 @@ export class SessionHub {
       bridge?.codex.onNotification(m);
     }
     else if (m.method === "serverRequest/resolved") for (const b of this.sessions.values()) b.codex.onNotification(m);
+    else if (["warning", "guardianWarning", "configWarning", "deprecationNotice"].includes(m.method)) for (const b of this.sessions.values()) b.codex.onNotification(m);
   }
   serverRequest(m) {
     const b = this.sessions.get(m.params?.threadId || m.params?.conversationId);

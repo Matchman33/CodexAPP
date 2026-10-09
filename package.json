@@ -26,6 +26,7 @@
     "test:terminal-process": "node tests/terminal-process.integration.mjs",
     "test:images-web": "npm run build:web && node tests/images-web.integration.mjs",
     "test:generated-images-web": "npm run build:web && node tests/generatedImages-web.integration.mjs",
+    "test:interactions-web": "npm run build:web && node tests/interactions-web.integration.mjs",
     "test:files-web": "npm run build:web && node tests/files-web.integration.mjs",
     "test:links-web": "npm run build:web && node tests/links-web.integration.mjs",
     "test:file-location-web": "npm run build:web && node tests/file-location-web.integration.mjs",

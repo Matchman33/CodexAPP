@@ -24,6 +24,8 @@ import { SessionPermissions } from "./sessionPermissions.mjs";
 import { ThreadLifecycle, restartIdleCodex } from "./threadLifecycle.mjs";
 import { resolveCodexBin } from "./codexBinary.mjs";
 import { FileAttachments } from "./fileAttachments.mjs";
+import { buildInteraction, interactionResult, isInteraction } from "./interactionRequests.mjs";
+import { messageSummary } from "./messageContent.mjs";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
@@ -197,7 +199,8 @@ export class CodexBridge {
     this.commandQueue = Promise.resolve();
     this.codex = options.client || new CodexClient(config.codexBin);
     this.permissions = new SessionPermissions(this.state, (method, params) => this.codex.request(method, params), () => this._broadcastState(), (threadId, error) => this.promptQueue.pause(threadId, error));
-    this.historyPager = new HistoryPager(this.codex);
+    // 分页时 cwd 尚未切换，只登记自带字节的图片；磁盘路径在切换完成后解析。
+    this.historyPager = new HistoryPager(this.codex, event => event.toolImages?.length ? this.files.decorateEvent(event, this.state) : event);
     this.history = null;
     this.models = new ModelSettings(this.codex, config, saveModel);
     this.writers = new WriterControl({ protectedPids: () => [process.pid, this.codex.child?.pid] });
@@ -316,7 +319,7 @@ export class CodexBridge {
 
   // ---- outbound helpers ----
   _pushEvent(entry) {
-    const raw = { id: crypto.randomUUID(), ts: Date.now(), threadId: this.state.threadId, ...entry };
+    const raw = this.files.decorateEvent({ id: crypto.randomUUID(), ts: Date.now(), threadId: this.state.threadId, ...entry }, this.state);
     const e = this.history ? boundEvent(raw, this.historyPager) : raw;
     const index = this.eventLog.findIndex((old) => old.id === e.id);
     if (index < 0) this.eventLog.push(e);
@@ -349,8 +352,15 @@ export class CodexBridge {
 
   // ---- codex -> client ----
   _onServerRequest(msg) {
-    const built = buildApproval(msg);
-    if (!built) { this.codex.respondError(msg.id, -32601, "unhandled: " + msg.method); return; }
+    let interaction;
+    try { interaction = buildInteraction(msg.method, msg.params || {}); }
+    catch (error) { this._pushEvent({ kind: "error", text: "无法显示工具提问：" + error.message }); this.codex.respondError(msg.id, -32602, error.message); return; }
+    const key = interaction ? crypto.randomUUID() : null;
+    const built = interaction ? { key, serverReqId: msg.id, method: msg.method, approval: { ...interaction, key } } : buildApproval(msg);
+    if (!built) {
+      this._pushEvent({ kind: "codex-notice", text: "暂不支持的 Codex 请求：" + msg.method + "\n" + messageSummary(msg.params) });
+      this.codex.respondError(msg.id, -32601, "unhandled: " + msg.method); return;
+    }
     this.pendingApprovals.set(built.key, built);
     this._pushEvent({ kind: "approval-requested", text: `${built.approval.title}: ${built.approval.command}` });
     this.emit({ type: "approval", approval: built.approval });
@@ -412,6 +422,10 @@ export class CodexBridge {
         this._streamDelta(params, "item:agentMessage", "assistantDelta");
         break;
       }
+      case "item/plan/delta": this._streamDelta(params, "item:plan", "itemDelta"); break;
+      case "item/mcpToolCall/progress":
+        this._pushEvent({ id: [st.threadId, params.turnId || st.turnId, params.itemId, "progress"].join(":"), kind: "codex-notice", text: "工具进度：" + String(params.message || "").slice(0, 8192) });
+        break;
       case "item/commandExecution/outputDelta":
       case "command/exec/outputDelta": {
         this._streamDelta(params, "item:commandExecution", "outputDelta");
@@ -439,7 +453,13 @@ export class CodexBridge {
         this._pushEvent({ kind: "error", text });
         break;
       }
-      default: break;
+      case "thread/tokenUsage/updated": break;
+      default:
+        if (params?.threadId || ["warning", "guardianWarning", "configWarning", "deprecationNotice"].includes(method)) {
+          const id = /(?:delta|progress)$/.test(method) ? [st.threadId, params?.turnId || st.turnId, params?.itemId || "", method].join(":") : undefined;
+          this._pushEvent({ ...(id ? { id } : {}), kind: "codex-notice", text: "Codex 通知：" + method + "\n" + messageSummary(params) });
+        }
+        break;
     }
   }
 
@@ -519,6 +539,7 @@ export class CodexBridge {
         this.emit({ type: "threadDeleted", threadId: m.threadId, requestId: m.requestId });
         return this._listThreads();
       case "approval": return this._resolveApproval(m.key, m.optionId);
+      case "interactionResponse": return this._resolveInteraction(m);
       case "newThread": return this._newThread(m.cwd, m.historyMode === "paged" || !!this.history);
       case "listThreads": return this._listThreads();
       case "readThread": return this._readThread(m.threadId, m.historyMode === "paged", m.requestId, m.checkWriter === true);
@@ -599,12 +620,22 @@ export class CodexBridge {
   async _resolveApproval(key, optionId) {
     const item = this.pendingApprovals.get(key);
     if (!item) throw new Error("审批已失效");
+    if (isInteraction(item.approval)) throw new Error("请通过提问卡片填写回答");
     this.pendingApprovals.delete(key);
     const result = approvalResult(item.method, optionId);
     if (result === null) this.codex.respondError(item.serverReqId, -32000, "denied");
     else this.codex.respond(item.serverReqId, result);
     this._pushEvent({ kind: "approval-resolved", text: `${item.approval.title}: ${optionId === "deny" ? "已拒绝" : "已批准"}` });
     this.emit({ type: "approvalResolved", key, by: "user" });
+  }
+  async _resolveInteraction(message) {
+    const item = this.pendingApprovals.get(message.key);
+    if (!item || !isInteraction(item.approval)) throw new Error("提问已失效，请重新打开会话");
+    const result = interactionResult(item.approval, message);
+    this.codex.respond(item.serverReqId, result);
+    this.pendingApprovals.delete(message.key);
+    this._pushEvent({ kind: "approval-resolved", text: item.approval.title + "：" + (result.action === "cancel" ? "已取消" : result.action === "decline" ? "已拒绝" : "已回答") });
+    this.emit({ type: "approvalResolved", key: message.key, by: "user" });
   }
   async _newThread(cwd, paged = false) {
     if (this.state.status !== "running") this.promptQueue.select(null);
@@ -643,7 +674,7 @@ export class CodexBridge {
     this.state.effectiveModel = null;
     this.state.effectiveReasoningEffort = null;
     this.state.lastDiff = "";
-    this.eventLog = page?.events || historyEvents(t);
+    this.eventLog = page?.events || historyEvents(t).map(event => this.files.decorateEvent(event, this.state));
     this.history = page ? { paged: true, nextCursor: page.nextCursor } : null;
     this.emit({ ...this.snapshot(), requestId });
   }
@@ -688,7 +719,7 @@ export class CodexBridge {
       this.history = { paged: true, nextCursor: page.nextCursor };
     } else {
       const history = await readThreadHistory(this.codex, this.state.threadId, t);
-      this.eventLog = historyEvents(history);
+      this.eventLog = historyEvents(history).map(event => this.files.decorateEvent(event, this.state));
     }
     this.emit(this.snapshot());
     return true;
