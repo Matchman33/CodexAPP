@@ -11,7 +11,7 @@ export const FILE_LIMITS = { maxBytes: 32 * 1024 * 1024, chunkBytes: 192 * 1024,
 const imageTypes = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
 const documentTypes = { ".pdf": "application/pdf", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xls": "application/vnd.ms-excel", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".csv": "text/csv", ".zip": "application/zip" };
 const extensions = new Set("png jpg jpeg webp gif bmp svg pdf xlsx xls csv ods docx doc odt pptx ppt odp zip 7z tar gz txt md json html css js mjs ts py c cpp h mp3 wav mp4 webm".split(" ").map(ext => "." + ext));
-const privatePath = relative => relative.split(/[\\/]/).some(part => part.startsWith(".") || ["node_modules", "codexapp.config.json", "agent.config.json", "auth.json", "credentials.json", "secrets.json"].includes(part.toLowerCase()));
+const privatePath = (relative, allowSmoke = false) => relative.split(/[\\/]/).some(part => (part.startsWith(".") && !(allowSmoke && part.toLowerCase() === ".smoke")) || ["node_modules", "codexapp.config.json", "agent.config.json", "auth.json", "credentials.json", "secrets.json"].includes(part.toLowerCase()));
 const privateFile = file => privatePath(path.relative(path.parse(file).root, file));
 const fingerprint = stat => [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
 const proseImagePath = /((?:(?<![a-z\d/\\])\/?[a-z]:[\\/][^\r\n`<>"|?*]{0,4096}?|(?<![\p{L}\p{N}:/\\])(?:(?:file:\/\/\/|sandbox:\/|\/|\.{1,2}[\\/]|[\p{L}\p{N}_.-]+[\\/])[^\r\n`<>"|?*]{0,4096}?|[\p{L}\p{N}_.-]{1,4096}))\.(?:png|jpe?g|webp|gif))(?=$|[\s，。；：、!?"'<>()[\]{},.;:])/giu;
@@ -45,6 +45,8 @@ export function fileReferences(text) {
       const standalone = token.type === "paragraph" ? markdownPathReference(token.text) : null;
       if (!standalone && ["paragraph", "text", "strong", "em", "del"].includes(token.type) && token.tokens) {
         refs.push(...proseImageReferences(token.tokens).slice(0, FILE_LIMITS.perEvent - refs.length));
+        // 普通文字已按原始片段拼回并扫描，不再把转义后的路径尾部当作另一个文件。
+        for (const child of token.tokens) if (child.type === "text" && !child.tokens && /\.(?:png|jpe?g|webp|gif)\s*$/i.test(child.raw ?? child.text)) labels.add(child);
       }
       if (["link", "image"].includes(token.type) && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
       if (standalone && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
@@ -63,9 +65,14 @@ export class FileAttachments {
     this.entries = new Map(); this.keys = new Map(); this.roots = new Map(); this.reading = 0;
     this.generatedImages = path.resolve(codexHome, "generated_images");
   }
-  readable(file) {
+  readable(file, scope) {
     if (!privateFile(file)) return true;
     if (!imageTypes[path.extname(file).toLowerCase()]) return false;
+    // 项目内的 .smoke 截图可转发，其他隐藏目录仍按原规则过滤。
+    if (scope && !privatePath(path.relative(path.parse(file).root, file), true) && [scope.cwd, scope.root].some(root => {
+      const relative = path.relative(root, file);
+      return relative && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
+    })) return true;
     try {
       // 默认生成目录位于隐藏的 Codex 目录，只开放其非隐藏图片，不开放整个 CODEX_HOME。
       const roots = [this.generatedImages, fs.realpathSync(this.generatedImages)];
@@ -103,7 +110,7 @@ export class FileAttachments {
       if (/[\x00-\x1f\x7f]/.test(target) || /^[/\\]{2}/.test(target) || target.replace(/^[a-z]:/i, "").includes(":")) return null;
       const file = path.resolve(scope.cwd, target);
       const real = fs.realpathSync(file);
-      if (!this.readable(file) || !this.readable(real)) return null;
+      if (!this.readable(file, scope) || !this.readable(real, scope)) return null;
       const ext = path.extname(real).toLowerCase();
       if (!extensions.has(ext)) return null;
       const stat = fs.statSync(real);
@@ -119,7 +126,7 @@ export class FileAttachments {
     } catch { return null; }
   }
   decorateEvent(event, state) {
-    if (event.live || !["item:agentMessage", "item:fileChange", "item:imageGeneration"].includes(event.kind)) return event;
+    if (event.live || !["item:agentMessage", "item:fileChange", "item:imageGeneration", "item:imageView"].includes(event.kind)) return event;
     const threadId = event.threadId || state.threadId;
     const refs = event.fileRefs?.length ? event.fileRefs : event.kind === "item:agentMessage" ? fileReferences(event.text) : [];
     const files = [], seen = new Set();
@@ -148,7 +155,8 @@ export class FileAttachments {
     let handle;
     try {
       const real = await fsp.realpath(entry.file);
-      if (real !== entry.real || !this.readable(entry.file) || !this.readable(real)) throw new Error("文件路径已变化，请重新打开会话");
+      const scope = this.roots.get(threadId);
+      if (real !== entry.real || !this.readable(entry.file, scope) || !this.readable(real, scope)) throw new Error("文件路径已变化，请重新打开会话");
       handle = await fsp.open(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
       const stat = await handle.stat();
       if (!stat.isFile() || stat.nlink > 1 || fingerprint(stat) !== entry.stamp || await fsp.realpath(entry.file) !== real) throw new Error("文件已变化，请重新打开会话");

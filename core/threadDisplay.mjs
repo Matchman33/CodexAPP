@@ -171,7 +171,7 @@ export function itemToEvent(item) {
     case "mcpToolCall": text = "工具: " + item.server + "/" + item.tool + (item.result ? "\n" + toolResultText(item.result) : "") + (item.error ? "\n" + item.error.message : ""); break;
     case "dynamicToolCall": text = "工具: " + [item.namespace, item.tool].filter(Boolean).join("/") + (item.contentItems ? "\n" + item.contentItems.map((c) => c.text || "[图片]").join("\n") : ""); break;
     case "collabAgentToolCall": text = "子任务: " + item.tool + (item.prompt ? "\n" + item.prompt : ""); break;
-    case "imageView": text = "[图片] " + item.path; break;
+    case "imageView": text = "[图片] " + item.path; fields.fileRefs = typeof item.path === "string" ? [item.path] : []; break;
     case "imageGeneration": text = "[生成图片] " + (item.savedPath || item.revisedPrompt || item.status); fields.fileRefs = item.savedPath ? [item.savedPath] : []; break;
     case "enteredReviewMode": case "exitedReviewMode": text = item.review; break;
     case "contextCompaction": text = "上下文已压缩"; break;

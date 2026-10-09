@@ -23,6 +23,7 @@ test("Markdown 文件引用保留空格、中文、绝对路径和行内代码�
   assert.deepEqual(fileReferences("[表格](<exports/报表 v1.xlsx>) `exports/a.pdf` ![图](exports/a.png)"), ["exports/报表 v1.xlsx", "exports/a.pdf", "exports/a.png"]);
   assert.deepEqual(itemToEvent({ type: "imageGeneration", savedPath: "out/a.png", status: "completed" }).fileRefs, ["out/a.png"]);
   assert.deepEqual(itemToEvent({ type: "fileChange", changes: [{ path: "a.xlsx", kind: { type: "add" } }, { path: "gone.pdf", kind: { type: "delete" } }] }).fileRefs, ["a.xlsx"]);
+  assert.deepEqual(fileReferences("**说明** docs/note.md"), ["docs/note.md"]);
 });
 test("同一文件的相对和绝对链接都映射到同一附件", t => {
   const { root, store, write } = fixture(t), absolute = write("chart.png");
@@ -82,6 +83,37 @@ test("Codex 默认生成目录仅开放消息引用的图片，历史和生成�
   fs.symlinkSync(path.join(codexHome, "private.png"), file);
   await assert.rejects(store.read({ attachmentId: registered.id, threadId: "one" }));
   assert.equal(store.register(file, "one"), null);
+});
+
+test("查看图片执行记录和历史页转发项目 .smoke 截图，普通图片标记保留完整路径", async t => {
+  const { root, store, write } = fixture(t);
+  const target = write("page/.smoke/skill-hover-1040.png", "smoke-screenshot");
+  assert.deepEqual(fileReferences("[图片] " + target), [target]);
+  const converted = itemToEvent({ id: "view", type: "imageView", path: target, status: "completed" });
+  assert.deepEqual(converted.fileRefs, [target]);
+  for (const message of [
+    { type: "event", event: { ...converted, threadId: "one" } },
+    { type: "historyPage", events: [{ ...converted, threadId: "one" }] },
+    { type: "event", event: { kind: "item:agentMessage", threadId: "one", text: "[图片] " + target } },
+  ]) {
+    const response = store.decorate(message, { cwd: root, threadId: "one" });
+    const event = response.event || response.events[0];
+    assert.equal(event.files?.[0]?.name, "skill-hover-1040.png");
+    assert.equal(event.files[0].preview, true);
+    assert.equal(Buffer.from((await store.read({ attachmentId: event.files[0].id, threadId: "one" })).data, "base64").toString(), "smoke-screenshot");
+  }
+  const live = store.decorateEvent({ ...converted, live: true, threadId: "one" }, { cwd: root, threadId: "one" });
+  assert.equal(live.files, undefined);
+  for (const blocked of ["page/.smoke/auth.json", "page/.smoke/.private/hidden.png", ".git/.smoke/hidden.png", "page/.private/hidden.png"]) {
+    assert.equal(store.register(write(blocked), "one"), null, blocked);
+  }
+  const outside = path.join(root, "..", ".smoke", "outside.png");
+  fs.mkdirSync(path.dirname(outside)); fs.writeFileSync(outside, "outside");
+  assert.equal(store.register(outside, "one"), null);
+  const registered = store.register(target, "one");
+  fs.unlinkSync(target); fs.symlinkSync(write("page/.private/secret.png"), target);
+  await assert.rejects(store.read({ attachmentId: registered.id, threadId: "one" }));
+  assert.equal(store.register(target, "one"), null);
 });
 
 test("项目外 Markdown 链接通过附件通道读取，仍拒绝隐藏文件", async t => {

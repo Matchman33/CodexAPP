@@ -43,9 +43,12 @@ try {
   });
   const bytes = Buffer.from(image, "base64"), projectImage = path.join(project, "outputs", "项目图片.png"), defaultImage = path.join(codexHome, "generated_images", "默认图片.png");
   await fs.writeFile(projectImage, bytes); await fs.writeFile(defaultImage, bytes);
+  const smokeImage = path.join(project, "page", ".smoke", "skill-hover-1040.png");
+  await fs.mkdir(path.dirname(smokeImage), { recursive: true }); await fs.writeFile(smokeImage, bytes);
   const events = [
     { kind: "item:agentMessage", threadId: "one", text: "图片已生成，保存在 " + projectImage + "，请查看。" },
     { ...itemToEvent({ id: "image", type: "imageGeneration", savedPath: defaultImage, status: "completed" }), threadId: "one" },
+    { ...itemToEvent({ id: "view", type: "imageView", path: smokeImage, status: "completed" }), threadId: "one" },
   ].map(event => store.decorateEvent(event, { threadId: "one", cwd: project }));
   assert(events.every(event => event.files?.length === 1));
   const nativeLinks = await page.evaluate(file => {
@@ -65,13 +68,12 @@ try {
     fileDownloads.configure({ supported: true });
     fileDownloads.send = request => { window.readGeneratedAttachment(request).then(message => fileDownloads.receive(message)).catch(error => fileDownloads.error({ requestId: request.requestId, message: error.message })); return true; };
     for (const [index, event] of events.entries()) {
-      const row = document.createElement("div"); row.id = "generated-" + index;
-      const body = document.createElement("div"); body.className = "body markdown";
-      body.innerHTML = window.ChatUI.markdown(event.text, event.files); row.append(body); document.body.append(row);
-      fileDownloads.render(row, event);
+      const row = createEventRow(event); row.id = "generated-" + index; document.body.append(row);
     }
   }, events);
-  await page.waitForFunction(() => [...document.querySelectorAll(".file-image-preview img")].filter(image => image.naturalWidth === 480).length === 2, null, { timeout: 5000 });
+  await page.waitForFunction(() => [...document.querySelectorAll(".file-image-preview img")].filter(image => image.naturalWidth === 480).length === 3, null, { timeout: 5000 });
+  assert.match(await page.locator("#generated-2 summary").textContent(), /执行记录.*已完成/);
+  assert.equal(await page.locator("#generated-2 .body").textContent(), "[图片] " + smokeImage);
   assert.equal(await page.locator("#imageDialog").isVisible(), false, "自动缩略图不应打开弹窗");
   const beforePreview = requests.length;
   await page.locator("#generated-0 .file-image-preview").click();
@@ -82,6 +84,12 @@ try {
   await page.getByRole("button", { name: "下载文件：默认图片.png", exact: true }).click();
   const download = await pending; assert.deepEqual(await fs.readFile(await download.path()), bytes);
   assert.equal(download.suggestedFilename(), "默认图片.png");
+  await page.locator("#generated-2 .file-image-preview").click();
+  await page.waitForFunction(() => $("imageDialog").open && $("imageDialog").querySelector("img").naturalWidth === 480);
+  await page.getByRole("button", { name: "关闭图片预览" }).click();
+  const pendingSmoke = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载文件：skill-hover-1040.png", exact: true }).click();
+  assert.deepEqual(await fs.readFile(await (await pendingSmoke).path()), bytes);
   await page.evaluate(event => fileDownloads.render(document.querySelector("#generated-0"), event), events[0]);
   await page.waitForFunction(() => document.querySelector("#generated-0 .file-image-preview img")?.naturalWidth === 480);
   assert.equal(requests.length, beforePreview, "重绘和下载应复用缩略图缓存");
@@ -118,7 +126,7 @@ try {
   await page.evaluate(() => fileDownloads.reset());
   assert.equal(await page.locator(".file-image-preview img[src]").count(), 0, "切换电脑或重置时移除旧图片 URL");
   assert.deepEqual(errors, []);
-  console.log("项目和默认目录生成图片：缩略图、放大、下载、缓存复用、前台请求优先、断线重连及重置验证通过。");
+  console.log("项目、默认目录和 .smoke 查看图片执行记录：缩略图、放大、下载、缓存复用、前台请求优先、断线重连及重置验证通过。");
 } finally {
   await browser?.close();
   const resolved = path.resolve(temp);
