@@ -65,6 +65,8 @@ export function localFileTarget(value) {
 export function markdownPathReference(value) {
   const target = localFileTarget(value);
   if (!target || !/\.(?:md|png|jpe?g|webp|gif)$/i.test(target) || /[\r\n`<>|?*]/.test(target)) return null;
+  const head = target.split(/[\\/]/)[0];
+  if (/[:：]/.test(head) && !/^(?:[a-z]:|file:|sandbox:)$/i.test(head)) return null;
   if (/\s/.test(target) && !/^(?:[a-z]:[\\/]|\/|file:|sandbox:)/i.test(target)) return null;
   return value.trim();
 }

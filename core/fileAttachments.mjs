@@ -14,6 +14,26 @@ const extensions = new Set("png jpg jpeg webp gif bmp svg pdf xlsx xls csv ods d
 const privatePath = relative => relative.split(/[\\/]/).some(part => part.startsWith(".") || ["node_modules", "codexapp.config.json", "agent.config.json", "auth.json", "credentials.json", "secrets.json"].includes(part.toLowerCase()));
 const privateFile = file => privatePath(path.relative(path.parse(file).root, file));
 const fingerprint = stat => [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+const proseImagePath = /((?:(?<![a-z\d/\\])\/?[a-z]:[\\/][^\r\n`<>"|?*]{0,4096}?|(?<![\p{L}\p{N}:/\\])(?:(?:file:\/\/\/|sandbox:\/|\/|\.{1,2}[\\/]|[\p{L}\p{N}_.-]+[\\/])[^\r\n`<>"|?*]{0,4096}?|[\p{L}\p{N}_.-]{1,4096}))\.(?:png|jpe?g|webp|gif))(?=$|[\s，。；：、!?"'<>()[\]{},.;:])/giu;
+
+function proseImageReferences(tokens) {
+  const refs = [];
+  let text = "";
+  const flush = () => {
+    for (const match of text.matchAll(proseImagePath)) {
+      if (refs.length >= FILE_LIMITS.perEvent) break;
+      refs.push(match[1]);
+    }
+    text = "";
+  };
+  // 拼回普通文字与 Markdown 转义，保持 Windows 路径；不扫描链接标签和代码块。
+  for (const token of tokens) {
+    if ((token.type === "text" && !token.tokens) || token.type === "escape") text += token.raw ?? token.text;
+    else flush();
+  }
+  flush();
+  return refs;
+}
 
 export function fileReferences(text) {
   const refs = [];
@@ -23,6 +43,9 @@ export function fileReferences(text) {
     marked.walkTokens(marked.lexer(String(text || "").slice(0, 262144)), token => {
       if (refs.length >= FILE_LIMITS.perEvent || labels.has(token)) return;
       const standalone = token.type === "paragraph" ? markdownPathReference(token.text) : null;
+      if (!standalone && ["paragraph", "text", "strong", "em", "del"].includes(token.type) && token.tokens) {
+        refs.push(...proseImageReferences(token.tokens).slice(0, FILE_LIMITS.perEvent - refs.length));
+      }
       if (["link", "image"].includes(token.type) && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
       if (standalone && token.tokens) marked.walkTokens(token.tokens, child => labels.add(child));
       const value = standalone || (["link", "image"].includes(token.type) ? markdownLinkReference(token) : token.type === "codespan" ? token.text : token.type === "text" && !token.tokens ? markdownPathReference(token.raw ?? token.text) : null);

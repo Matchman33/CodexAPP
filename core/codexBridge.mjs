@@ -44,7 +44,7 @@ export class CodexClient {
     this.onExit = () => {};
   }
   start() {
-    if (this.child && this.child.exitCode === null && this.child.signalCode === null && !this.child.stdin.destroyed) throw new Error("Codex 控制进程仍在运行，不能重复启动");
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) throw new Error("Codex 控制进程仍在运行，不能重复启动");
     const bin = resolveCodexBin(this.configuredBin);
     if (!bin) throw new Error("未找到可用 Codex；桌面端版本需包含完整配套文件，请更新或修复安装，或配置独立 CLI 路径");
     this.bin = bin;
@@ -65,6 +65,25 @@ export class CodexClient {
     child.on("error", error => { console.error("[codex] 启动失败:", error.message); finish(1, null); });
     child.on("exit", finish);
     return this.child;
+  }
+  async stop() {
+    const child = this.child;
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error("Codex 控制进程正在退出，请等待连接恢复")); }
+    this.pending.clear();
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise((resolve, reject) => {
+      let timer;
+      const cleanup = () => { clearTimeout(timer); child.off("exit", exited); child.off("error", failed); };
+      const exited = () => { cleanup(); resolve(); };
+      const failed = error => { cleanup(); reject(error); };
+      child.once("exit", exited); child.once("error", failed);
+      timer = setTimeout(() => {
+        console.error("[codex] 正常退出超时，回收本应用控制子进程 pid=" + child.pid);
+        timer = setTimeout(() => failed(new Error("控制进程回收后仍未退出，请检查电脑端日志")), 5000);
+        try { child.kill("SIGKILL"); } catch (error) { failed(error); }
+      }, 10000);
+      try { child.stdin.end(); } catch (error) { failed(error); }
+    });
   }
   _onData(chunk) {
     this.buf += chunk.toString("utf8");
@@ -89,7 +108,7 @@ export class CodexClient {
   }
   request(method, params, { timeoutMs } = {}) {
     if (this.releasingChild && this.releasingChild === this.child) return Promise.reject(new Error("会话释放期间控制连接重连，请稍后重试"));
-    if (!this.child?.stdin || this.child.stdin.destroyed || this.child.exitCode !== null || this.child.signalCode !== null) return Promise.reject(new Error("Codex 连接已断开"));
+    if (!this.child?.stdin || this.child.stdin.destroyed || this.child.stdin.writableEnded || this.child.exitCode !== null || this.child.signalCode !== null) return Promise.reject(new Error("Codex 连接已断开"));
     const id = this.nextId++;
     const payload = { jsonrpc: "2.0", id, method };
     if (params !== undefined) payload.params = params;
@@ -215,7 +234,14 @@ export class CodexBridge {
       this._broadcastState();
       this.ensureConnected();
     };
-    if (!options.client) {
+    this.ownsCodexClient = !options.client;
+    this.resumeRecovery();
+  }
+
+  resumeRecovery() {
+    this.stopped = false;
+    this.healthFailures = 0;
+    if (this.ownsCodexClient && !this.healthTimer) {
       this.healthTimer = setInterval(() => { void this.checkHealth(); }, 30000);
       this.healthTimer.unref();
     }
@@ -256,6 +282,7 @@ export class CodexBridge {
     this.stopped = true;
     clearTimeout(this.restartTimer); this.restartTimer = null;
     clearInterval(this.healthTimer);
+    this.healthTimer = null;
   }
 
   async checkHealth() {

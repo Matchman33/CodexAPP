@@ -28,6 +28,14 @@ test("Codex RPC 超时移除等待记录，晚到响应不影响后续请求", a
   assert.equal((await result).config.model, "new"); assert.equal(client.pending.size, 0);
 });
 
+test("结束输入后的存活控制进程不能重复启动", t => {
+  const client = new CodexClient(process.execPath);
+  const existing = { stdin: { destroyed: true, writableEnded: true }, exitCode: null, signalCode: null };
+  client.child = existing;
+  t.after(() => { if (client.child !== existing) client.child?.kill(); });
+  assert.throws(() => client.start(), /仍在运行/);
+});
+
 test("连续两次健康检查超时才回收自己的 Codex，正常 RPC 错误不触发重启", async () => {
   let killed = 0, hang = false;
   const client = { child: { kill() { killed++; } }, request: async () => {

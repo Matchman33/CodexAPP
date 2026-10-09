@@ -44,7 +44,7 @@ try {
   const bytes = Buffer.from(image, "base64"), projectImage = path.join(project, "outputs", "项目图片.png"), defaultImage = path.join(codexHome, "generated_images", "默认图片.png");
   await fs.writeFile(projectImage, bytes); await fs.writeFile(defaultImage, bytes);
   const events = [
-    { kind: "item:agentMessage", threadId: "one", text: "![项目图片](<" + projectImage.replaceAll("\\", "/") + ">)" },
+    { kind: "item:agentMessage", threadId: "one", text: "图片已生成，保存在 " + projectImage + "，请查看。" },
     { ...itemToEvent({ id: "image", type: "imageGeneration", savedPath: defaultImage, status: "completed" }), threadId: "one" },
   ].map(event => store.decorateEvent(event, { threadId: "one", cwd: project }));
   assert(events.every(event => event.files?.length === 1));

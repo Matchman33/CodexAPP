@@ -128,16 +128,10 @@ export class SessionHub {
   busy() { return [...this.sessions.values()].some(b => b.state.status === "running" || b.promptQueue.active?.starting || b.pendingApprovals.size); }
   async stop() {
     if (this.terminals.activeCount) throw new Error("仍有活动终端，请先明确结束终端再重启项目");
-    const child = this.control.codex.child;
     this.control.stopRecovery();
-    this.control.codex.onExit = () => {};
     this.control.state.codexConnected = false; this.controlMessage({ type: "state", state: this.control.state });
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("控制进程尚未正常退出")), 10000);
-      child.once("close", () => { clearTimeout(timer); resolve(); });
-      child.stdin.end();
-    });
+    try { await this.control.codex.stop(); }
+    catch (error) { this.control.resumeRecovery(); this.control.ensureConnected(); throw error; }
   }
   disconnect(clientId) { this.terminals.detach(clientId); this.selected.delete(clientId); this.clientQueues.delete(clientId); this.drafts.delete(clientId); this.pagedClients.delete(clientId); }
   dispatch(m, clientId = m.clientId || "legacy") {

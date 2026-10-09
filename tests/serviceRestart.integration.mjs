@@ -8,6 +8,7 @@ import { once } from "node:events";
 import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexapp-restart-"));
+const ignoreEof = process.argv.includes("--ignore-eof");
 let launcher, socket, log = "";
 try {
   for (const name of ["core", "relay", "scripts"]) await fs.cp(name, path.join(root, name), { recursive: true });
@@ -16,9 +17,9 @@ try {
   const reserve = net.createServer(); await new Promise(resolve => reserve.listen(0, "127.0.0.1", resolve));
   const port = reserve.address().port; await new Promise(resolve => reserve.close(resolve));
   await fs.writeFile(path.join(root, "codexapp.config.json"), JSON.stringify({ codexBin: process.execPath, host: "127.0.0.1", port, token: "fixture", model: "fixture", defaultCwd: root, preventSleep: false }));
-  launcher = fork(path.join(root, "scripts/run.mjs"), ["relay"], { cwd: root, env: { ...process.env, NODE_OPTIONS: "--import=" + pathToFileURL(path.join(root, "fake.mjs")).href, CODEX_HOME: path.join(root, "home"), CODEXAPP_DATA_DIR: path.join(root, "data"), CODEXAPP_PREVENT_SLEEP: "0" }, stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true });
+  launcher = fork(path.join(root, "scripts/run.mjs"), ["relay"], { cwd: root, env: { ...process.env, NODE_OPTIONS: "--import=" + pathToFileURL(path.join(root, "fake.mjs")).href, CODEX_HOME: path.join(root, "home"), CODEXAPP_DATA_DIR: path.join(root, "data"), CODEXAPP_PREVENT_SLEEP: "0", CODEXAPP_TEST_IGNORE_EOF: ignoreEof ? "1" : "0" }, stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true });
   launcher.stdout.on("data", d => { log += d; }); launcher.stderr.on("data", d => { log += d; });
-  const until = async fn => { for (let i = 0; i < 160; i++) { if (await fn()) return; if (launcher.exitCode !== null) throw new Error(log); await new Promise(r => setTimeout(r, 50)); } throw new Error("timeout: " + log); };
+  const until = async fn => { for (let i = 0; i < 400; i++) { if (await fn()) return; if (launcher.exitCode !== null) throw new Error(log); await new Promise(r => setTimeout(r, 50)); } throw new Error("timeout: " + log); };
   const calls = async () => { try { return (await fs.readFile(path.join(root, "calls.jsonl"), "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse); } catch { return []; } };
   const healthy = async () => { try { return (await (await fetch("http://127.0.0.1:" + port + "/health")).json()).codexConnected; } catch { return false; } };
   await until(healthy);
@@ -44,10 +45,14 @@ try {
   assert.equal(restored.promptQueue.paused, true); assert.equal(restored.promptQueue.items[0].text, "waiting");
   assert.equal((await calls()).filter(c => c.method === "turn/start").length, 1);
   const inits = (await calls()).filter(c => c.method === "initialize"); assert.notEqual(inits[0].pid, inits[1].pid);
+  if (ignoreEof) assert.match(log, /正常退出超时，回收本应用控制子进程/);
+  send({ type: "listThreads" });
+  await until(() => messages.some(m => m.type === "projectTree"));
+  assert.deepEqual(messages.find(m => m.type === "projectTree").projects, []);
   send({ type: "resumeQueue", threadId: "one" });
   await until(async () => (await calls()).filter(c => c.method === "turn/start").length === 2);
   assert.equal((await calls()).filter(c => c.method === "turn/start")[1].params.input[0].text, "waiting");
-  console.log("PASS: real isolated supervisor restart, same port, changed child PID, paused queue recovery and manual resume; model prompts: 0");
+  console.log("PASS: " + (ignoreEof ? "EOF 超时后回收自身控制进程；" : "正常退出；") + "真实受控重启、原端口重连、新控制进程 PID、项目列表、队列暂停恢复及手动继续验证通过；模型请求：0");
 } finally {
   socket?.terminate();
   if (launcher?.exitCode === null) { const exit = once(launcher, "exit"); launcher.send({ type: "codexapp-stop" }); await exit; }

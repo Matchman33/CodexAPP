@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { SessionHub } from "../core/sessionHub.mjs";
 import { enableServiceRestart } from "../core/serviceRestart.mjs";
 
@@ -22,6 +23,7 @@ function fixture(t) {
     if (method === "model/list") return { data: [{ model: "fixture", isDefault: true, supportedReasoningEfforts: [] }] };
     if (method === "config/read") return { config: { model: "fixture" } };
     if (method === "turn/interrupt") return {};
+    if (method === "initialize") return { userAgent: "recovery-fixture" };
     if (method === "thread/unsubscribe") return { status: "notLoaded" };
     throw new Error("unexpected: " + method);
   };
@@ -151,6 +153,59 @@ test("取消等待重启恢复原队列状态，未确认或不支持的重启�
   await hub.dispatch({ type: "cancelRestart" });
   assert.equal(hub.restart.phase, "idle");
   assert.equal(hub.sessions.get("one").promptQueue.snapshot().paused, false);
+});
+
+test("控制进程不响应 EOF 时回收本应用子进程后继续重启，队列不自动执行", async t => {
+  const { hub } = fixture(t);
+  await hub.dispatch({ type: "readThread", threadId: "one" });
+  const b = hub.sessions.get("one");
+  b.promptQueue.pause("one", "测试暂停");
+  await hub.dispatch({ type: "enqueuePrompt", text: "later", requestId: "later" });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => hub.control.stopRecovery());
+  const child = new EventEmitter();
+  Object.assign(child, { exitCode: null, signalCode: null, stdin: { end() {} }, kill(signal) {
+    this.signalCode = signal; this.emit("exit", null, signal);
+  } });
+  hub.control.codex.child = child;
+  let restarted = false;
+  enableServiceRestart(hub, async () => { await hub.stop(); restarted = true; });
+  const restart = hub.dispatch({ type: "restartService", confirmed: true, requestId: "eof-timeout" });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(10000);
+  await restart;
+  assert.equal(restarted, true, "控制进程超时应回收自身子进程并继续重启");
+  assert.equal(child.exitCode !== null || child.signalCode !== null, true);
+  assert.equal(b.promptQueue.snapshot().paused, true);
+  assert.equal(b.promptQueue.snapshot().items[0].text, "later");
+  assert.equal(child.listenerCount("close"), 0);
+});
+
+test("控制进程回收失败后恢复自动连接并清理退出监听器", async t => {
+  const { hub, calls } = fixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.after(() => hub.control.stopRecovery());
+  const child = new EventEmitter();
+  Object.assign(child, { exitCode: null, signalCode: null, stdin: { end() {} }, kill() { return false; } });
+  hub.control.codex.child = child;
+  enableServiceRestart(hub, () => hub.stop());
+  const restart = hub.dispatch({ type: "restartService", confirmed: true, requestId: "failed-stop" });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(10000); t.mock.timers.tick(5000);
+  await restart;
+  assert.equal(hub.restart.phase, "idle");
+  assert.match(hub.restart.error, /退出/);
+  assert.equal(hub.control.stopped, false, "失败后必须恢复连接恢复能力");
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.listenerCount("exit"), 0);
+  assert.equal(child.listenerCount("error"), 0);
+  child.exitCode = 0;
+  hub.control.codex.start = () => { hub.control.codex.child = { stdin: { write() {} }, exitCode: null, signalCode: null }; };
+  t.mock.timers.tick(1500);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(hub.state.codexConnected, true);
+  await hub.dispatch({ type: "prompt", text: "recovered" });
+  assert.equal(calls.filter(c => c.method === "turn/start").length, 1);
 });
 
 test("尚未选会话时保存配置后直接发送能创建会话，旧客户端保留完整历史模式", async t => {

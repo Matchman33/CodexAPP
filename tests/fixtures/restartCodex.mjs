@@ -13,6 +13,7 @@ if (process.argv[1]?.endsWith("app-server")) {
     if (m.method === "model/list") result = { data: [{ model: "fixture", isDefault: true }] };
     if (["thread/start", "thread/read", "thread/resume"].includes(m.method)) result = { thread: { id: p.threadId || "one", cwd: process.cwd(), turns: [] } };
     if (m.method === "thread/turns/list") result = { data: [], nextCursor: null };
+    if (m.method === "thread/list") result = { data: [], nextCursor: null };
     if (m.method === "turn/start") { active = { threadId: p.threadId, turn: { id: "turn-" + Date.now(), status: "inProgress" } }; result = { turn: active.turn }; }
     send({ id: m.id, result });
   });
@@ -22,6 +23,11 @@ if (process.argv[1]?.endsWith("app-server")) {
       send({ method: "turn/completed", params: active }); active = null;
     }
   }, 30);
-  lines.on("close", () => { clearInterval(poll); process.exit(0); });
+  lines.on("close", () => {
+    if (process.env.CODEXAPP_TEST_IGNORE_EOF === "1" && !fs.existsSync("ignored-eof")) {
+      fs.writeFileSync("ignored-eof", "done"); return;
+    }
+    clearInterval(poll); process.exit(0);
+  });
   await new Promise(() => {});
 }

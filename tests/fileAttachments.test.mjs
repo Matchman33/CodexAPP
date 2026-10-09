@@ -41,6 +41,20 @@ test("项目图片纯路径、图片链接和生成事件均按实际路径登�
   }
 });
 
+test("助手只在普通句子中给出图片路径时自动登记，不需要图片链接或公网地址", async t => {
+  const { root, store, write } = fixture(t);
+  const absolute = write("outputs/测试 图片.png", "prose-image");
+  const relative = write("outputs/chart.png", "relative-image");
+  for (const text of ["图片路径：" + absolute, "图片路径:" + absolute, "Image path:" + absolute, "图片保存在" + absolute + "，请查看。", "已生成图片，保存在 " + absolute + "，请查看。", "结果在 outputs/chart.png。", "图片路径：outputs/chart.png", "图片路径：" + relative, "**图片路径：" + absolute + "**", "- 图片路径：" + absolute, "1. Image saved at " + absolute]) {
+    const event = store.decorateEvent({ kind: "item:agentMessage", threadId: "one", text }, { threadId: "one", cwd: root });
+    assert.equal(event.files?.length, 1, text);
+    const chunk = await store.read({ attachmentId: event.files[0].id, threadId: "one" });
+    assert.equal(Buffer.from(chunk.data, "base64").toString(), text.includes("chart.png") ? "relative-image" : "prose-image");
+  }
+  assert.equal(store.register(relative, "other"), null);
+  for (const text of ["网页：https://example.com/outputs/chart.png", "[outputs/chart.png](https://example.com)", "```text\noutputs/chart.png\n```"]) assert.deepEqual(fileReferences(text), [], text);
+});
+
 test("Codex 默认生成目录仅开放消息引用的图片，历史和生成事件可传输且不放开其他隐藏文件", async t => {
   const { temp, root } = fixture(t), codexHome = path.join(temp, ".codex");
   const generated = path.join(codexHome, "generated_images"); fs.mkdirSync(generated, { recursive: true });
