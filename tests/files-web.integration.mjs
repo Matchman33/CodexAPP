@@ -153,7 +153,7 @@ try {
   await page.getByRole("button", { name: "下载文件：报表.xlsx", exact: true }).scrollIntoViewIfNeeded();
   await page.evaluate(() => { document.querySelector('[aria-label="下载文件：报表.xlsx"]').click(); document.querySelector('[aria-label="取消接收：报表.xlsx"]').click(); });
   await page.locator(".file-feedback").filter({ hasText: "已取消" }).waitFor();
-  assert.notEqual(await page.evaluate(() => fileDownloads.active?.file.name), "报表.xlsx", "取消下载后不能继续接收该文件；允许后台加载缩略图");
+  assert.equal(await page.evaluate(() => fileDownloads.active), null, "取消下载后停止接收文件");
   await page.evaluate(() => { document.querySelector('[aria-label="下载文件：报表.xlsx"]').click(); disposeConnection(); });
   await page.locator(".file-feedback").filter({ hasText: "连接已断开" }).waitFor();
   await page.evaluate(() => resumeConnection()); await page.waitForFunction(() => sessionReady);
